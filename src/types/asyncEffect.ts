@@ -2,7 +2,7 @@
 import type { Exit } from "./effect";
 import {Canceler} from "./cancel";
 import {BrassError} from "../fibers/fiber";
-
+import {Scope} from "../scheduler/scope";
 
 
 export type Async<R, E, A> =
@@ -19,6 +19,9 @@ export type Async<R, E, A> =
     andThen: (a: any) => Async<R, E, A>;
 };
 
+export function unit(): Async<unknown, unknown, undefined> {
+    return asyncSync(() => undefined);
+}
 
 export const asyncSucceed = <A>(value: A): Async<unknown, never, A> => ({
     _tag: "Succeed",
@@ -118,5 +121,34 @@ export function fromPromiseAbortable<R, E, A>(
             done = true;
             ac.abort();
         };
+    });
+}
+
+
+
+export function acquireRelease<R, E, A>(
+    acquire: Async<R, E, A>,
+    release: (res: A, exit: Exit<E, any>) => Async<R, any, any>,
+    scope: Scope<R>
+): Async<R, E, A> {
+    return asyncFlatMap(acquire, (resource) => {
+        // registrar finalizer
+        scope.addFinalizer((exit) => release(resource, exit));
+
+        return asyncSucceed(resource);
+    });
+}
+
+function registerInterruptible<R, E, A>(
+    register: (env: R, cb: (exit: Exit<E, A>) => void) => void | Canceler
+): Async<R, E, A> {
+    return async<R, E, A>((env, cb) => {
+        const canceler = register(env, cb);
+
+        return typeof canceler === "function"
+            ? asyncSync((_env) => {
+                try { canceler(); } catch {}
+            })
+            : unit();
     });
 }
