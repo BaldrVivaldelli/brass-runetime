@@ -15,7 +15,7 @@
   "scripts": {
     "dev": "ts-node-dev src/examples/demo.ts",
     "build": "tsc",
-    "test": "node -e \"console.log('no tests yet')\"",
+    "test": "tsx src/examples/index.ts",
     "prepublishOnly": "npm run build"
   },
   "devDependencies": {
@@ -28,6 +28,7 @@
     "conventional-changelog-conventionalcommits": "^7.x.x",
     "semantic-release": "^25.0.2",
     "ts-node-dev": "^2.0.0",
+    "tsx": "^4.21.0",
     "typescript": "^5.9.3"
   }
 }
