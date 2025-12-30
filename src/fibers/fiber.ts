@@ -17,6 +17,12 @@ export type Fiber<E, A> = {
 
 let nextId: FiberId = 1;
 
+export type BrassError =
+    | { _tag: "Abort" }
+    | { _tag: "PromiseRejected"; reason: unknown };
+
+
+
 class RuntimeFiber<R, E, A> implements Fiber<E, A> {
     readonly id: FiberId;
 

@@ -1,5 +1,9 @@
 // src/asyncEffect.ts
 import type { Exit } from "./effect";
+import {Canceler} from "./Cancel";
+import {BrassError} from "../fibers/fiber";
+
+
 
 export type Async<R, E, A> =
     | { _tag: "Succeed"; value: A }
@@ -7,13 +11,14 @@ export type Async<R, E, A> =
     | { _tag: "Sync"; thunk: (env: R) => A }
     | {
     _tag: "Async";
-    register: (env: R, cb: (exit: Exit<E, A>) => void) => void;
+    register: (env: R, cb: (exit: Exit<E, A>) => void) => void | Canceler;
 }
     | {
     _tag: "FlatMap";
     first: Async<R, E, any>;
     andThen: (a: any) => Async<R, E, A>;
 };
+
 
 export const asyncSucceed = <A>(value: A): Async<unknown, never, A> => ({
     _tag: "Succeed",
@@ -58,4 +63,60 @@ export function asyncFlatMap<R, E, A, B>(
         first: fa,
         andThen: f,
     };
+}
+export function fromPromise <R, E, A>(
+    thunk: (env: R) => Promise<A>,
+    onError: (e: unknown) => E
+):Async<R, E, A> {
+    return async((env: R, cb: (exit: Exit<E, A>) => void) => {
+        thunk(env)
+            .then((value) => cb({_tag: "Success", value}))
+            .catch((err) => cb({_tag: "Failure", error: onError(err)}));
+    });
+}
+
+//TODO: Esto lo hago porque me interesa saber el nombre explicito de lo que falla, no solo que falle sino mas bien un detalle
+const isAbortError = (e: unknown): boolean =>
+    typeof e === "object" &&
+    e !== null &&
+    "name" in e &&
+    (e as any).name === "AbortError";
+
+export function tryPromiseAbortable<R = unknown, A = unknown>(
+    thunk: (env: R, signal: AbortSignal) => Promise<A>
+): Async<R, BrassError, A> {
+    return fromPromiseAbortable(thunk, (e): BrassError =>
+        isAbortError(e)
+            ? { _tag: "Abort" }
+            : { _tag: "PromiseRejected", reason: e }
+    );
+}
+
+export function fromPromiseAbortable<R, E, A>(
+    thunk: (env: R, signal: AbortSignal) => Promise<A>,
+    onError: (e: unknown) => E
+): Async<R, E, A> {
+    return async((env: R, cb: (exit: Exit<E, A>) => void): void | Canceler => {
+        const ac = new AbortController();
+        let done = false;
+
+        const safeCb = (exit: Exit<E, A>) => {
+            if (done) return;
+            done = true;
+            cb(exit);
+        };
+
+        try {
+            const p = thunk(env, ac.signal);
+            p.then((value) => safeCb({ _tag: "Success", value }))
+                .catch((err) => safeCb({ _tag: "Failure", error: onError(err) }));
+        } catch (e) {
+            safeCb({ _tag: "Failure", error: onError(e) });
+        }
+
+        return () => {
+            done = true;
+            ac.abort();
+        };
+    });
 }
