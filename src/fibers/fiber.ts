@@ -13,7 +13,7 @@ export type Fiber<E, A> = {
     readonly status: () => FiberStatus;
     readonly join: (cb: (exit: Exit<E | Interrupted, A>) => void) => void;
     readonly interrupt: () => void;
-    readonly addFinalizer: (f: (exit: Exit<E | Interrupted, A>) => Async<any, any, any>) => void;
+    readonly addFinalizer: (f: (exit: Exit<E | Interrupted, A>) => void) => void;
 };
 
 
@@ -41,15 +41,13 @@ class RuntimeFiber<R, E, A> implements Fiber<E, A> {
     private readonly env: R;
     private readonly stack: ((a: any) => Async<R, E, any>)[] = [];
 
-    private readonly fiberFinalizers: Array<
-        (exit: Exit<E | Interrupted, A>) => Async<R, any, any>
-    > = [];
+    private readonly fiberFinalizers: Array<(exit: Exit<E | Interrupted, A>) => void> = [];
+
 
     private scheduled = false;
     private finalizersDrained = false;
 
     private blockedOnAsync = false;
-    private asyncCallbackArmed = false; // evita callback doble (por seguridad)
 
     constructor(effect: Async<R, E, A>, env: R, private readonly scheduler: Scheduler) {
         this.id = nextId++;
@@ -57,9 +55,11 @@ class RuntimeFiber<R, E, A> implements Fiber<E, A> {
         this.env = env;
     }
 
-    addFinalizer(f: (exit: Exit<E | Interrupted, A>) => Async<R, any, any>): void {
+    addFinalizer(f: (exit: Exit<E | Interrupted, A>) => void): void {
         this.fiberFinalizers.push(f);
     }
+
+
 
     status(): FiberStatus {
         return this.statusValue;
@@ -91,64 +91,36 @@ class RuntimeFiber<R, E, A> implements Fiber<E, A> {
         }, `fiber#${this.id}.${tag}`);
     }
 
+    private runFinalizersOnce(exit: Exit<E | Interrupted, A>): void {
+        if (this.finalizersDrained) return;
+        this.finalizersDrained = true;
+
+        while (this.fiberFinalizers.length > 0) {
+            const fin = this.fiberFinalizers.pop()!;
+            try { fin(exit); } catch {}
+        }
+    }
 
 
     private notify(exit: Exit<E | Interrupted, A>): void {
-        // ya terminó
         if (this.result != null) return;
-
-        // ya estamos cerrando (single-shot)
         if (this.closing != null) return;
 
-        // ✅ entramos a modo cierre (tipo ZIO: transición Running -> Done/Finishing ocurre una vez)
         this.finishing = true;
         this.closing = exit;
 
-        // 1) efecto: correr finalizers (exactamente una vez)
-        const runFinalizers = this.drainFinalizers(exit);
+        // ✅ ejecutar finalizers YA (garantiza clearInterval)
+        this.runFinalizersOnce(exit);
 
-        // 2) efecto: completar fiber + avisar joiners
-        const complete: Async<R, any, void> = {
-            _tag: "Sync" as const,
-            thunk: (_env: R) => {
-                this.statusValue = this.interrupted ? "Interrupted" : "Done";
-                this.result = exit;
+        // completar
+        this.statusValue = this.interrupted ? "Interrupted" : "Done";
+        this.result = exit;
 
-                for (const j of this.joiners) j(exit);
-                this.joiners.length = 0;
-
-                return undefined;
-            },
-        };
-
-        // ✅ cortar evaluación normal
-        this.stack.length = 0;
-
-        // ✅ si estaba suspendida en Async, la “despertamos” para que avance el cierre
-        this.blockedOnAsync = false;
-        this.asyncCallbackArmed = false;
-
-        // ✅ reemplazamos el programa por "finalizers >> complete"
-        this.current = asyncFlatMap(runFinalizers, () => complete as any) as any;
-
-        // ✅ ejecutar el cierre
-        this.schedule("notify-step");
+        for (const j of this.joiners) j(exit);
+        this.joiners.length = 0;
     }
 
 
-    private drainFinalizers(exit: Exit<E | Interrupted, A>): Async<R, any, void> {
-        if (this.finalizersDrained) return asyncSucceed(undefined);
-        this.finalizersDrained = true;
-
-        const fins = this.fiberFinalizers.splice(0);
-
-        let eff: Async<R, any, void> = asyncSucceed(undefined);
-        for (let i = fins.length - 1; i >= 0; i--) {
-            const finEff = fins[i](exit) as Async<R, any, any>;
-            eff = asyncFlatMap(finEff, () => eff);
-        }
-        return eff;
-    }
 
     private onSuccess(value: any): void {
         const cont = this.stack.pop();
@@ -201,51 +173,53 @@ class RuntimeFiber<R, E, A> implements Fiber<E, A> {
                 return;
 
             case "Async": {
-                if (this.closing != null || this.result != null) return;
-
-                if (this.interrupted) {
-                    // dejamos que step() (al inicio) haga el notify(Interrupted)
-                    // o directamente:
-                    this.notify({ _tag: "Failure", error: { _tag: "Interrupted" } as any } as any);
-                    return;
-                }
+                if (this.finishing) return;
 
                 this.blockedOnAsync = true;
 
-                this.asyncCallbackArmed = true;
+                let pending: Exit<any, any> | null = null;
+                let completedSync = false;
 
-                const canceler = current.register(this.env, (exit) => {
-                    if (!this.asyncCallbackArmed) return;
-                    this.asyncCallbackArmed = false;
+                const resume = () => {
+                    if (!pending) return;
+                    const exit = pending;
+                    pending = null;
 
-                    // despertar
                     this.blockedOnAsync = false;
 
-                    // si ya cerramos/terminamos, ignorar callback tardío
                     if (this.result != null || this.closing != null) return;
 
                     if (this.interrupted) {
-                        this.notify({ _tag: "Failure", error: { _tag: "Interrupted" } as any } as any);
-                        this.schedule("interrupt-after-async-step");
+                        this.onFailure({ _tag: "Interrupted" } as Interrupted);
                         return;
                     }
 
                     if (exit._tag === "Success") this.onSuccess(exit.value);
                     else this.onFailure(exit.error);
 
-                    this.schedule("async-callback-step");
+                    this.schedule("async-resume");
+                };
+
+                const canceler = current.register(this.env, (exit) => {
+                    // guardamos el resultado, pero NO ejecutamos todavía
+                    pending = exit;
+                    completedSync = true;
+                    // no llamamos resume acá
                 });
 
                 if (typeof canceler === "function") {
-                    this.addFinalizer((_exit) =>
-                        asyncSync((_env) => {
-                            try { canceler(); } catch {}
-                        })
-                    );
+                    this.addFinalizer((_exit) => {
+                        try { canceler(); } catch {}
+                    });
+                }
+
+                if (completedSync) {
+                    this.scheduler.schedule(resume, `fiber#${this.id}.async-sync-resume`);
                 }
 
                 return;
             }
+
 
         }
     }
