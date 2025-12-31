@@ -1,361 +1,138 @@
-# 🛠️ brass-runtime — Mini runtime funcional al estilo ZIO en TypeScript
+# 🛠️ brass-runtime — Mini ZIO-like runtime in TypeScript
 
-**brass-runtime** es un runtime funcional inspirado en **ZIO 2**, escrito en **TypeScript vanilla** y **sin usar Promises ni async/await** como primitiva principal de modelado.
+A small experimental runtime inspired by ZIO 2, implemented in vanilla TypeScript and intentionally built without using `Promise` / `async`/`await` as the primary semantic primitive.
 
-El objetivo del proyecto es explorar cómo construir, desde cero, un sistema de:
-
-- **Efectos puros** (sincrónicos y asincrónicos)
-- **Concurrencia estructurada**
-- **Fibras** (fibers)
-- **Scheduler cooperativo**
-- **Limpieza segura de recursos (acquire / release)**
-- **Scopes estructurados**
-- **Finalizers (a nivel scope y fibra)**
-- **Streams estructurados (ZStream-like) con backpressure**
-
-Todo con un diseño **determinístico**, **pure FP**, y sin depender de `Promise` ni `async/await` para la semántica del modelo.
+Goals: explore typed effects, structured concurrency, fibers, cooperative scheduling, resource safety and streams with backpressure — in a deterministic, pure-FP friendly way.
 
 ---
 
-## ✨ Características principales
+## Key ideas
 
-### 1. `Effect` sincrónico (núcleo funcional)
-
-En `brass-runtime`, un efecto puro se modela como:
-
-```ts
-type Exit<E, A> =
-  | { _tag: "Success"; value: A }
-  | { _tag: "Failure"; error: E };
-
-type Effect<R, E, A> = (env: R) => Exit<E, A>;
-```
-
-Con combinadores típicos de un sistema de efectos:
-
-- `map`
-- `flatMap`
-- `mapError`
-- `catchAll`
-- `zip`
-- `foreach`
-- `collectAll`
-- `as`, `asUnit`, `tap`
-
-Este núcleo no usa `Promise` ni `async/await`. Es **100% sincrónico y determinista**.
+- Pure, sync core effect: `Effect<R, E, A>` and `Exit<E, A>`.
+- An algebraic representation for async work: `Async<R, E, A>` with an explicit interpreter (no `Promise` as runtime primitive).
+- A cooperative `Scheduler` for deterministic task interleaving and fairness.
+- Lightweight `Fiber`s with cooperative interruption, `join`, and LIFO finalizers.
+- Structured `Scope`s that manage child fibers, sub-scopes and finalizers; closing a scope cleans up children deterministically.
+- Resource-safe `acquireRelease` semantics (acquire + release tied to scope finalizers).
+- Structured concurrency combinators: `race`, `zipPar`, `collectAllPar`.
+- ZStream-style streams with backpressure, `Pull` semantics and resource safety.
 
 ---
 
-### 2. `Async` — efectos asincrónicos sin Promises
+## What's new (recent changes)
 
-Para modelar operaciones asincrónicas, `brass-runtime` define un tipo de datos algebraico:
+- Implemented stream buffering primitives: `buffer` supports bounded buffering with backpressure semantics.
+- Added `fromPromiseAbortable` helper to integrate callback/Promise APIs that support `AbortSignal`, preserving cooperative cancellation.
+- Added `toPromise` for interop convenience (tests/examples use it to await results from the runtime).
+- New example: `src/examples/fromPromise.ts` — demonstrates creating a stream from abortable Promises and using `buffer` + `collectStream`.
+- Misc: tests and examples updated to exercise buffer modes and abortable integration.
 
-```ts
-type Async<R, E, A> =
-  | { _tag: "Succeed"; value: A }
-  | { _tag: "Fail"; error: E }
-  | { _tag: "Sync"; thunk: (env: R) => A }
-  | { _tag: "Async"; register: (env: R, cb: (exit: Exit<E, A>) => void) => void }
-  | { _tag: "FlatMap"; first: Async<R, E, any>; andThen: (a: any) => Async<R, E, A> };
-```
-
-Con constructores como:
-
-- `asyncSucceed`
-- `asyncFail`
-- `asyncSync`
-- `asyncTotal`
-- `async` (primitive para integrar APIs callback-based como `setTimeout`, `fs`, etc.)
-- `asyncMap`
-- `asyncFlatMap`
-
-Y un runtime que ejecuta `Async` mediante un **intérprete explícito**, sin usar `Promise`.
+Branch containing recent work: `feature/buffer-pipes`.
 
 ---
 
-### 3. Scheduler cooperativo
-
-El sistema usa un **scheduler cooperativo** con una cola de tareas:
-
-```ts
-class Scheduler {
-  schedule(task: () => void): void;
-}
-```
-
-El `Scheduler` controla:
-
-- el orden en que se ejecutan los pasos de cada fibra,
-- la equidad (fairness),
-- posibles políticas de prioridad.
-
-Esto permite testear y razonar sobre la concurrencia sin depender del azar del event loop.
-
----
-
-### 4. Fibers (fibras)
-
-Cada programa `Async` corre dentro de una **fibra**:
-
-```ts
-type Fiber<E, A> = {
-  id: number;
-  status: () => "Running" | "Done" | "Interrupted";
-  join: (cb: (exit: Exit<E | Interrupted, A>) => void) => void;
-  interrupt: () => void;
-  addFinalizer: (f: (exit: Exit<E | Interrupted, A>) => Async<any, any, any>) => void;
-};
-```
-
-Las fibras proveen:
-
-- concurrencia liviana (miles de fibers),
-- cancelación cooperativa (`interrupt`),
-- `join` para esperar resultados,
-- **finalizers de fibra** (LIFO) que se ejecutan siempre: éxito, fallo o interrupción.
-
----
-
-### 5. Scopes — Concurrencia estructurada
-
-Un **Scope** modela una unidad de concurrencia estructurada:
-
-```ts
-class Scope<R> {
-  fork<E, A>(eff: Async<R, E, A>, env: R): Fiber<E, A>;
-  subScope(): Scope<R>;
-  addFinalizer(f: (exit: Exit<any, any>) => Async<R, any, any>): void;
-  close(exit?: Exit<any, any>): void;
-  isClosed(): boolean;
-}
-```
-
-Un scope:
-
-- rastrea las fibras hijas,
-- rastrea sub-scopes,
-- mantiene una pila de finalizers (LIFO),
-- al cerrarse:
-    - interrumpe fibras hijas,
-    - cierra sub-scopes,
-    - ejecuta finalizers registrados.
-
-Esto da **concurrencia estructurada** al estilo ZIO:
-si algo vive en un `Scope`, se limpia cuando el scope termina.
-
----
-
-### 6. Acquire / Release — Resource Safety
-
-Al estilo `ZIO.acquireRelease`, `brass-runtime` implementa:
-
-```ts
-acquireRelease(
-  acquire: Async<R, E, A>,
-  release: (res: A, exit: Exit<any, any>) => Async<R, any, any>,
-  scope: Scope<R>
-): Async<R, E, A>;
-```
-
-Semántica:
-
-- `acquire` corre dentro del scope,
-- si tiene éxito, registra un finalizer que hace `release(res, exitFinalDelScope)`,
-- el finalizer se ejecuta:
-    - si el scope cierra con éxito,
-    - si hay error,
-    - si hay interrupción/cancelación.
-
-**Garantiza cleanup de recursos** (archivos, sockets, conexiones, etc.) de forma estructurada.
-
----
-
-### 7. Structured Concurrency: `race`, `zipPar`, `collectAllPar`
-
-Sobre fibras, scopes y `Async`, se construyen combinadores de **concurrencia estructurada**:
-
-#### `race(left, right, scope)`
-
-- ejecuta `left` y `right` en paralelo dentro de un scope,
-- el primero que termina “gana”,
-- la fibra perdedora se interrumpe,
-- se propaga el resultado del ganador.
-
-#### `zipPar(left, right, scope)`
-
-- ejecuta ambos efectos en paralelo,
-- si alguno falla → se cancela el otro,
-- si ambos tienen éxito → devuelve `[A, B]`.
-
-#### `collectAllPar(effects, scope)`
-
-- ejecuta una lista de efectos en paralelo,
-- si alguno falla → cancela el resto,
-- si todos completan → devuelve la lista de resultados.
-
-Esto replica la semántica de **ZIO 2 structured concurrency**.
-
----
-
-### 8. ZStream-like — Streams estructurados con backpressure
-
-`brass-runtime` incluye una base de **streams estructurados** inspirados en `ZStream`:
-
-```ts
-type Pull<R, E, A> = Async<R, Option<E>, A>;
-
-type ZStream<R, E, A> = {
-  open: (scope: Scope<R>) => Pull<R, E, A>;
-};
-```
-
-Donde:
-
-- `Success(a)` → el stream produjo un valor,
-- `Failure(Some(e))` → error,
-- `Failure(None)` → fin del stream.
-
-Constructores básicos:
-
-- `empty`
-- `streamOf`
-- `fromArray`
-
-Transformaciones:
-
-- `map`
-- `filter`
-- `fromResource` (integra acquire/release con streams)
-
-Consumo:
-
-```ts
-runCollect(stream, env): Async<R, E, A[]>;
-```
-
-El consumo se hace respetando backpressure: cada `pull` produce como mucho un valor,
-y el scope del stream garantiza que todos los recursos/finalizers se limpien al terminar
-(el stream o el consumidor).
-
----
-
-## 📁 Estructura sugerida del proyecto
-
-Una posible organización de archivos para tu repo de **brass-runtime**:
-
-```bash
-src/
-  fibers/    
-  scheduler/    
-  stream/
-  types/
-    
-
-examples/
-  demo.ts
-  fiberFinalizer.ts
-  resourceExample.ts
-```
-
----
-
-## 🚀 Ejemplo rápido
-
-```ts
-import {
-  asyncTotal,
-  asyncFlatMap,
-  asyncSucceed,
-} from "./asyncEffect";
-import { sleep } from "./std";
-import { Scope } from "./scope";
-import { race } from "./concurrency";
-
-type Env = {};
-
-function task(name: string, ms: number) {
-  return asyncFlatMap(sleep(ms), () =>
-    asyncSucceed(`Terminé ${name}`)
-  );
-}
-
-function main() {
-  const env: Env = {};
-  const scope = new Scope<Env>();
-
-  const fast = task("rápida", 200);
-  const slow = task("lenta", 1000);
-
-  race(fast, slow, scope)(env, exit => {
-    console.log("Resultado race:", exit);
-    scope.close(exit);
-  });
-}
-
-main();
-```
-
----
-
-## 🧪 Objetivos del proyecto
-
-- Explorar el diseño de runtimes funcionales modernos (tipo ZIO) en TypeScript.
-- Entender y practicar:
-    - Efectos tipados (`R`, `E`, `A`),
-    - Concurrencia estructurada,
-    - Fibras,
-    - Scopes y finalizers,
-    - Streams con recursos seguros y backpressure.
-- Servir como base educativa y potencialmente como **runtime experimental**
-  para proyectos de ejemplo, demos y pruebas de conceptos FP en TS.
-
----
-
-## 📝 Estado actual
-
-- [x] Núcleo de efectos sincrónicos (`Effect`)
-- [x] Núcleo de efectos asincrónicos (`Async`) sin Promises
-- [x] Scheduler cooperativo
-- [x] Fibers con finalizers
-- [x] Scopes con finalizers (LIFO)
-- [x] Acquire / Release
-- [x] Concurrencia estructurada (`race`, `zipPar`, `collectAllPar`)
-- [x] Streams básicos (`ZStream`-like) con backpressure y scopes
-- [ ] Buffering en streams
-- [ ] Merge / zipPar de streams
+## Features (status)
+
+- [x] Sync core: `Effect` (pure FP core)
+- [x] Async algebra: `Async` (no Promises in semantics)
+- [x] Cooperative `Scheduler`
+- [x] Fibers with LIFO finalizers and interruption
+- [x] `Scope` (structured concurrency and finalizers)
+- [x] `acquireRelease` / resource safety
+- [x] Structured concurrency: `race`, `zipPar`, `collectAllPar`
+- [x] ZStream-like core (pull-based, resource-aware)
+- [x] Buffering in streams (bounded/backpressure modes)
+- [ ] Merge / zipPar of streams
 - [ ] Hubs / Broadcast / Multicast
-- [ ] Pipelines (tipo `ZPipeline`)
-- [ ] Channels / Sinks avanzado
+- [ ] Pipelines (`ZPipeline`-style)
+- [ ] Advanced Channels / Sinks
 
 ---
 
-## 📜 Licencia
+## API highlights
 
-Este proyecto está pensado como laboratorio de ideas FP.
-Se recomienda usar licencia MIT:
+Core types
+- `type Exit<E, A> = Success | Failure`
+- `type Effect<R, E, A> = (env: R) => Exit<E, A>`
+- `type Async<R, E, A> = Succeed | Fail | Sync | Async | FlatMap`
 
-```text
-MIT License
-Copyright (c) 2025
-```
+Async constructors
+- `asyncSucceed`, `asyncFail`, `asyncSync`, `asyncTotal`
+- `async` primitive for callback integration
+- `asyncMap`, `asyncFlatMap`
+- `fromPromiseAbortable` — integrate APIs that accept `AbortSignal` and support cooperative cancellation
+
+Fibers / Concurrency
+- `Fiber<E, A>`: `id`, `status()`, `join(cb)`, `interrupt()`, `addFinalizer(...)`
+- `Scheduler.schedule(task: () => void)`
+- `race`, `zipPar`, `collectAllPar` — structured concurrency semantics
+
+Scopes & Resource safety
+- `class Scope<R>`: `fork`, `subScope`, `addFinalizer`, `close`, `isClosed`
+- `acquireRelease(acquire, release, scope)`
+
+Streams (ZStream-like)
+- `type Pull<R, E, A> = Async<R, Option<E>, A>`
+- `type ZStream<R, E, A> = { open: (scope: Scope<R>) => Pull<R, E, A> }`
+- Constructors: `empty`, `streamOf`, `fromArray`, `fromPull`
+- Transformations: `map`, `filter`, `fromResource`
+- Buffering: `buffer(stream, capacity, mode)` — bounded buffer with backpressure or dropping modes
+- Interop: `collectStream`, `runCollect`, `toPromise` for awaiting results in examples
 
 ---
 
-## 🤝 Contribuciones
+## Example (what to look at)
 
-Ideas de mejora, PRs y discusiones de diseño son más que bienvenidas.
+See `src/examples/fromPromise.ts`:
+- Shows `fromPromiseAbortable` producing stream elements with cooperative cancellation.
+- Demonstrates `buffer` with a bounded capacity and backpressure semantics.
+- Uses `collectStream` + `toPromise` to gather stream output in an example-run friendly way.
 
-Algunas direcciones interesantes para futuro:
-
-- Integrar fs / net de Node de forma segura vía `Async`,
-- Agregar tests deterministas de concurrencia,
-- Implementar Hubs y Queues al estilo ZIO,
-- Extender ZStream con merges, buffers y pipelines,
-- Explorar integración con TypeScript decorators para “endpoints” basados en efectos.
+Do not copy the example here — open `src/examples/fromPromise.ts` for details.
 
 ---
 
-Hecho con ❤️ en TypeScript, para aprender y jugar con runtimes funcionales.
+## Running examples and tests
 
-**Nombre del proyecto:** `brass-runtime`  
-**Objetivo:** construir un mini ZIO-like runtime en el ecosistema JS/TS, pero manteniendo el control total sobre la semántica de los efectos desde el código de usuario.
+- Use your editor's run configuration (WebStorm 2025.3.1 recommended) or run with `ts-node` for quick iteration.
+- Typical flow:
+  - Install deps: `npm install`
+  - Run an example directly: `npx ts-node src/examples/fromPromise.ts` (or configure a Node run config that compiles first)
+  - Build: `npm run build` → run compiled files from `dist/`
+
+Adjust the commands to your preferred setup. The project intentionally leaves runtime execution flexible (ts-node, esbuild, tsc + node, etc.).
+
+---
+
+## Project structure (recommended)
+Examples:
+- `src/examples/fromPromise.ts` (abortable promise -> stream + buffer)
+- `src/examples/resourceExample.ts` (acquire/release + scope)
+- `src/examples/fiberFinalizer.ts` (fiber finalizer LIFO semantics)
+
+---
+
+## Design notes
+
+- Determinism: scheduling is explicit and testable via the cooperative `Scheduler`.
+- No hidden `Promise` semantics: the runtime models async as an algebraic datatype with an explicit interpreter.
+- Resource safety is structural — scopes tie resource lifetimes to lexical structure, ensuring deterministic cleanup.
+- Streaming model uses pull-based backpressure; buffering is explicit and configurable.
+
+---
+
+## Contributing
+
+- Branch for current work: `feature/buffer-pipes`.
+- Open issues / PRs welcome. Aim for small, focused PRs that preserve the runtime invariants (no hidden Promise semantics).
+- Tests should exercise scheduling determinism, interruption guarantees and resource cleanup.
+
+---
+
+## License
+
+MIT License © 2025
+
+---
+
+If you need the README translated to Spanish or a trimmed/expanded version for npm package metadata, a shorter project landing page, or a CHANGELOG entry for the branch `feature/buffer-pipes`, provide the preference and a target audience.

@@ -1,7 +1,7 @@
 // src/asyncEffect.ts
 import type { Exit } from "./effect";
 import {Canceler} from "./cancel";
-import {BrassError} from "../fibers/fiber";
+import {BrassError, fork} from "../fibers/fiber";
 import {Scope} from "../scheduler/scope";
 
 
@@ -9,15 +9,48 @@ export type Async<R, E, A> =
     | { _tag: "Succeed"; value: A }
     | { _tag: "Fail"; error: E }
     | { _tag: "Sync"; thunk: (env: R) => A }
+    | { _tag: "Async"; register: (env: R, cb: (exit: Exit<E, A>) => void) => void | Canceler }
+    | { _tag: "FlatMap"; first: Async<R, E, any>; andThen: (a: any) => Async<R, E, A> }
     | {
-    _tag: "Async";
-    register: (env: R, cb: (exit: Exit<E, A>) => void) => void | Canceler;
-}
-    | {
-    _tag: "FlatMap";
+    _tag: "Fold";
     first: Async<R, E, any>;
-    andThen: (a: any) => Async<R, E, A>;
+    onFailure: (e: any) => Async<R, E, A>;
+    onSuccess: (a: any) => Async<R, E, A>;
 };
+
+
+
+export function asyncFold<R, E, A, B>(
+    fa: Async<R, E, A>,
+    onFailure: (e: E) => Async<R, E, B>,
+    onSuccess: (a: A) => Async<R, E, B>
+): Async<R, E, B> {
+    return { _tag: "Fold", first: fa, onFailure, onSuccess };
+}
+
+export function asyncCatchAll<R, E, A, R2, E2, B>(
+    fa: Async<R, E, A>,
+    handler: (e: E) => Async<R2, E2, B>
+): Async<R & R2, E2, A | B> {
+    return asyncFold(
+        fa as any,
+        (e: E) => handler(e) as any,
+        (a: A) => asyncSucceed(a) as any
+    ) as any;
+}
+
+
+export function asyncMapError<R, E, E2, A>(
+    fa: Async<R, E, A>,
+    f: (e: E) => E2
+): Async<R, E2, A> {
+    return asyncFold(
+        fa as any,
+        (e: E) => asyncFail(f(e)) as any,
+        (a: A) => asyncSucceed(a) as any
+    ) as any;
+}
+
 
 export function unit(): Async<unknown, unknown, undefined> {
     return asyncSync(() => undefined);
@@ -44,7 +77,7 @@ export const asyncTotal = <A>(thunk: () => A): Async<unknown, unknown, A> =>
     asyncSync(() => thunk());
 
 export const async = <R, E, A>(
-    register: (env: R, cb: (exit: Exit<E, A>) => void) => void
+    register: (env: R, cb: (exit: Exit<E, A>) => void) => void | Canceler
 ): Async<R, E, A> => ({
     _tag: "Async",
     register,
@@ -67,6 +100,18 @@ export function asyncFlatMap<R, E, A, B>(
         andThen: f,
     };
 }
+
+export function toPromise<R, E, A>(eff: Async<R, E, A>, env: R): Promise<A> {
+    return new Promise((resolve, reject) => {
+        const fiber = fork(eff as any, env);
+        fiber.join((exit: Exit<unknown, unknown>) => {
+            const ex = exit as Exit<E, A>;
+            if (ex._tag === "Success") resolve(ex.value);
+            else reject(ex.error);
+        });
+    });
+}
+
 export function fromPromise <R, E, A>(
     thunk: (env: R) => Promise<A>,
     onError: (e: unknown) => E
@@ -124,31 +169,20 @@ export function fromPromiseAbortable<R, E, A>(
     });
 }
 
-
-
 export function acquireRelease<R, E, A>(
     acquire: Async<R, E, A>,
     release: (res: A, exit: Exit<E, any>) => Async<R, any, any>,
     scope: Scope<R>
 ): Async<R, E, A> {
     return asyncFlatMap(acquire, (resource) => {
-        // registrar finalizer
         scope.addFinalizer((exit) => release(resource, exit));
 
         return asyncSucceed(resource);
     });
 }
 
-function registerInterruptible<R, E, A>(
+export function asyncInterruptible<R, E, A>(
     register: (env: R, cb: (exit: Exit<E, A>) => void) => void | Canceler
 ): Async<R, E, A> {
-    return async<R, E, A>((env, cb) => {
-        const canceler = register(env, cb);
-
-        return typeof canceler === "function"
-            ? asyncSync((_env) => {
-                try { canceler(); } catch {}
-            })
-            : unit();
-    });
+    return async(register);
 }

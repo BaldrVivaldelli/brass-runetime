@@ -4,17 +4,30 @@
   "description": "Effect runtime utilities for TypeScript",
   "license": "ISC",
   "author": "",
-  "type": "commonjs",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./package.json": "./package.json"
+  },
   "files": [
     "dist",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "package.json"
   ],
   "scripts": {
     "dev": "ts-node-dev src/examples/demo.ts",
-    "build": "tsc",
+    "build": "npm run build:esm && npm run build:cjs",
+    "build:esm": "tsc -p tsconfig.esm.json",
+    "build:cjs": "tsc -p tsconfig.cjs.json && node -e \"import fs from 'fs'; if (fs.existsSync('dist/index.cjs')) fs.unlinkSync('dist/index.cjs'); fs.renameSync('dist/index.js','dist/index.cjs')\"",
     "test": "tsx src/examples/index.ts",
     "prepublishOnly": "npm run build"
   },

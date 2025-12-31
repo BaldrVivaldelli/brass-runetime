@@ -39,7 +39,10 @@ class RuntimeFiber<R, E, A> implements Fiber<E, A> {
     // estado de evaluación
     private current: Async<R, E, any>;
     private readonly env: R;
-    private readonly stack: ((a: any) => Async<R, E, any>)[] = [];
+    private readonly stack: (
+        | { _tag: "SuccessCont"; k: (a: any) => Async<R, E, any> }
+        | { _tag: "FoldCont"; onFailure: (e: any) => Async<R, E, any>; onSuccess: (a: any) => Async<R, E, any> }
+        )[] = [];
 
     private readonly fiberFinalizers: Array<(exit: Exit<E | Interrupted, A>) => void> = [];
 
@@ -122,18 +125,25 @@ class RuntimeFiber<R, E, A> implements Fiber<E, A> {
 
 
 
+
     private onSuccess(value: any): void {
-        const cont = this.stack.pop();
-        if (!cont) {
-            this.notify({ _tag: "Success", value } as Exit<E | Interrupted, A>);
+        const frame = this.stack.pop();
+        if (!frame) {
+            this.notify({ _tag: "Success", value } as any);
             return;
         }
-        this.current = cont(value);
-        //this.schedule("onSuccess-step");
+        this.current = frame._tag === "SuccessCont" ? frame.k(value) : frame.onSuccess(value);
     }
 
     private onFailure(error: any): void {
-        this.notify({ _tag: "Failure", error } as Exit<E | Interrupted, A>);
+        while (this.stack.length > 0) {
+            const frame = this.stack.pop()!;
+            if (frame._tag === "FoldCont") {
+                this.current = frame.onFailure(error);
+                return;
+            }
+        }
+        this.notify({ _tag: "Failure", error } as any);
     }
 
     step(): void {
@@ -167,10 +177,15 @@ class RuntimeFiber<R, E, A> implements Fiber<E, A> {
                 return;
 
             case "FlatMap":
-                this.stack.push(current.andThen);
+                this.stack.push({ _tag: "SuccessCont", k: current.andThen });
                 this.current = current.first;
-                //this.schedule("flatMap-step");
                 return;
+
+            case "Fold":
+                this.stack.push({ _tag: "FoldCont", onFailure: current.onFailure, onSuccess: current.onSuccess });
+                this.current = current.first;
+                return;
+
 
             case "Async": {
                 if (this.finishing) return;
