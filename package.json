@@ -4,24 +4,23 @@
   "description": "Effect runtime utilities for TypeScript",
   "license": "ISC",
   "author": "",
-  "type": "module",
-  "main": "./dist/cjs/index.cjs",
-  "module": "./dist/esm/index.js",
-  "types": "./dist/types/index.d.ts",
-  "sideEffects": false,
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/types/index.d.ts",
-      "import": "./dist/esm/index.js",
-      "require": "./dist/cjs/index.cjs"
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
     },
     "./http": {
-      "types": "./dist/types/http/index.d.ts",
-      "import": "./dist/esm/http/index.js",
-      "require": "./dist/cjs/http/index.cjs"
+      "types": "./dist/http/index.d.ts",
+      "import": "./dist/http/index.js",
+      "require": "./dist/http/index.cjs"
     },
     "./package.json": "./package.json"
-  },
+  }
+,
   "files": [
     "dist",
     "README.md",
