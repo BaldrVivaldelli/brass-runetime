@@ -1,4 +1,6 @@
 import "./demo";
 import "./fiberFinalizer";
 import "./resourceExample";
-import "./test-canceler";
+import "./canceler";
+import "./toPromise"
+import "./fromPromise"

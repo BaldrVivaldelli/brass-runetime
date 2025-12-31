@@ -1,49 +1,114 @@
-/*
-import {ZStream} from "./stream";
+import {fromPull, ZStream} from "./stream";
+import { uncons,  } from "./stream";
+
+import {Async, asyncFold} from "../types/asyncEffect";
+import { asyncFlatMap, asyncSucceed, asyncSync } from "../types/asyncEffect";
+
+import {none, Option, some} from "../types/option";
+import { fork } from "../fibers/fiber";
+import { bounded } from "./queue";
 
 type Signal<E, A> =
     | { _tag: "Elem"; value: A }
     | { _tag: "End" }
-    | { _tag: "Fail"; error: E }
-function buffer<R, E, A>(
-    stream: ZStream<R, E, A>,
+    | { _tag: "Fail"; error: E };
+
+export function buffer<R, E, A>(
+    stream: ZStream<{} & R, E, A>,
     capacity: number,
-    strategy: "backpressure" | "dropping" | "sliding" = "backpressure",
-): ZStream<R, E, A> {
-    return new ZStream((scope) =>
-        Async.gen(function* (_) {
-            const pullUp = yield* _(stream.open(scope))
-            const q = yield* _(Queue.bounded<Signal<E, A>>(capacity, strategy))
+    strategy: "backpressure" | "dropping" | "sliding" = "backpressure"
+): ZStream<{} & R, E, A> {
+    let started = false;
+    let q: any = null;
+    let producer: any = null;
 
-            // Producer fiber: llena la cola
-            const producer = yield* _(Async.forkScoped(scope, // importante: scoped para que se interrumpa al cerrar
-                Async.forever(
-                    pullUp.foldCauseAsync(
-                        // upstream terminó/falló
-                        (cause) =>
-                            cause.match({
-                                end: () => q.offer({ _tag: "End" }).unit(),
-                                fail: (e) => q.offer({ _tag: "Fail", error: e }).unit(),
-                            }),
-                        // got elem
-                        (a) => q.offer({ _tag: "Elem", value: a }).unit(),
-                    )
-                )
-            ))
+    // vamos actualizando el upstream a medida que consumimos
+    let upstream: ZStream<{} & R, E, A> = stream;
 
-            // Downstream Pull
-            const pullDown: Pull<R, E, A> = q.take().flatMap((sig) => {
-                switch (sig._tag) {
-                    case "Elem": return Async.succeed(sig.value)
-                    case "End":  return Async.fail(None)        // fin del stream
-                    case "Fail": return Async.fail(Some(sig.error))
+    /**
+     * Convierte `uncons(upstream)` (que falla con Option<E>) en una Signal que NO falla:
+     * - Success => Elem(a) y actualiza upstream
+     * - Failure(None) => End
+     * - Failure(Some(e)) => Fail(e)
+     */
+    const nextSignal = (): Async<R, never, Signal<E, A>> =>
+        asyncFold(
+            uncons(upstream),
+            (opt: Option<E>) =>
+                asyncSucceed(
+                    opt._tag === "None"
+                        ? ({ _tag: "End" } as Signal<E, A>)
+                        : ({ _tag: "Fail", error: opt.value } as Signal<E, A>)
+                ),
+            ([a, tail]) =>
+                asyncSync(() => {
+                    upstream = tail;
+                    return { _tag: "Elem", value: a } as Signal<E, A>;
+                }) as any
+        ) as any;
+
+    const start = (env: {} & R): Async<{} & R, any, void> =>
+        asyncFlatMap(bounded<Signal<E, A>>(capacity, strategy), (_q) => {
+            q = _q;
+
+            const loop = (): Async<{} & R, any, void> =>
+                asyncFlatMap(nextSignal(), (sig) =>
+                    asyncFlatMap(q.offer(sig as any), () => {
+                        // si llega End/Fail, cortamos el productor
+                        if (sig._tag === "End" || sig._tag === "Fail") {
+                            return asyncSucceed(undefined);
+                        }
+                        return loop();
+                    })
+                );
+
+            producer = fork(loop() as any, env);
+            started = true;
+
+            return asyncSucceed(undefined);
+        });
+
+    const pullDown: Async<{} & R, any, [A, ZStream<{} & R, E, A>]> = {
+        _tag: "Async",
+        register: (env: {} & R, cb: { (exit: any): void; (exit: any): void; }) => {
+            const go = () => {
+                if (!started) {
+                    fork(start(env) as any, env).join(() => {
+                        pullFromQueue(env, cb);
+                    });
+                    return;
                 }
-            })
+                pullFromQueue(env, cb);
+            };
+            go();
+        },
+    } as any;
 
-            // Importante: si el consumidor termina antes,
-            // el scope debería interrumpir producer automáticamente.
-            return pullDown
-        })
-    )
+    function pullFromQueue(env: {} & R, cb: (exit: any) => void) {
+        const takeEff: Async<{} & R, never, Signal<E, A>> = q.take();
+
+        fork(takeEff as any, env).join((ex: any) => {
+            if (ex._tag !== "Success") return; // take no debería fallar
+
+            const sig = ex.value as Signal<E, A>;
+
+            switch (sig._tag) {
+                case "Elem":
+                    cb({ _tag: "Success", value: [sig.value, fromPull(pullDown as any)] });
+                    return;
+
+                case "End":
+                    producer?.interrupt?.();
+                    cb({ _tag: "Failure", error: none });
+                    return;
+
+                case "Fail":
+                    producer?.interrupt?.();
+                    cb({ _tag: "Failure", error: some(sig.error) });
+                    return;
+            }
+        });
+    }
+
+    return fromPull(pullDown as any);
 }
-*/
