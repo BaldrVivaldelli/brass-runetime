@@ -1,14 +1,31 @@
-// src/runtime/client.ts
-
-import {Async} from "../types/asyncEffect";
-import {fromPromiseAbortable} from "../runtime/runtime";
+// src/http/client.ts
+import { Async, asyncFlatMap, asyncSucceed, asyncSync } from "../types/asyncEffect";
+import { fromPromiseAbortable } from "../runtime/runtime";
 
 export type HttpError =
     | { _tag: "Abort" }
     | { _tag: "BadUrl"; message: string }
     | { _tag: "FetchError"; message: string };
 
-export type ResponseSpec = {
+export type HttpMethod =
+    | "GET"
+    | "POST"
+    | "PUT"
+    | "PATCH"
+    | "DELETE"
+    | "HEAD"
+    | "OPTIONS";
+
+export type HttpRequest = {
+    method: HttpMethod;
+    url: string; // relative o absolute
+    headers?: Record<string, string>;
+    body?: string;
+    // (si querés) params extra: redirect, cache, credentials, etc
+    init?: Omit<RequestInit, "method" | "headers" | "body">;
+};
+
+export type HttpWireResponse = {
     status: number;
     statusText: string;
     headers: Record<string, string>;
@@ -16,24 +33,16 @@ export type ResponseSpec = {
     ms: number;
 };
 
-export type HttpClient = {
-    get: (url: string, init?: Omit<RequestInit, "method">) => Async<unknown, HttpError, ResponseSpec>;
-    post: (url: string, body?: string, init?: Omit<RequestInit, "method" | "body">) => Async<unknown, HttpError, ResponseSpec>;
-
-    getText: (url: string, init?: Omit<RequestInit, "method">) => Async<unknown, HttpError, string>;
-    getJson: <A>(url: string, init?: Omit<RequestInit, "method">) => Async<unknown, HttpError, A>;
-
-    postJson: <A extends object>(url: string, body: A, init?: Omit<RequestInit, "method" | "body">) => Async<unknown, HttpError, ResponseSpec>;
-};
-
-type MakeHttpConfig = {
+export type MakeHttpConfig = {
     baseUrl?: string;
     headers?: Record<string, string>;
 };
 
+export type HttpClient = (req: HttpRequest) => Async<unknown, HttpError, HttpWireResponse>;
+
 const normalizeHttpError = (e: unknown): HttpError => {
     if (e instanceof DOMException && e.name === "AbortError") return { _tag: "Abort" };
-    if (typeof e === "object" && e && "_tag" in e) return e as HttpError;
+    if (typeof e === "object" && e && "_tag" in (e as any)) return e as HttpError;
     return { _tag: "FetchError", message: String(e) };
 };
 
@@ -41,8 +50,8 @@ export function makeHttp(cfg: MakeHttpConfig = {}): HttpClient {
     const baseUrl = cfg.baseUrl ?? "";
     const defaultHeaders = cfg.headers ?? {};
 
-    const send = (req: RequestInit & { url: string }) =>
-        fromPromiseAbortable<HttpError, ResponseSpec>(
+    return (req) =>
+        fromPromiseAbortable<HttpError, HttpWireResponse>(
             async (signal) => {
                 let url: URL;
                 try {
@@ -54,8 +63,10 @@ export function makeHttp(cfg: MakeHttpConfig = {}): HttpClient {
                 const started = performance.now();
 
                 const res = await fetch(url, {
-                    ...req,
+                    ...(req.init ?? {}),
+                    method: req.method,
                     headers: { ...defaultHeaders, ...(req.headers ?? {}) },
+                    body: req.body,
                     signal,
                 });
 
@@ -73,29 +84,16 @@ export function makeHttp(cfg: MakeHttpConfig = {}): HttpClient {
             },
             normalizeHttpError
         );
-
-    return {
-        get: (url, init) => send({ url, method: "GET", ...(init ?? {}) }),
-        post: (url, body, init) =>
-            send({ url, method: "POST", body: body && body.length > 0 ? body : undefined, ...(init ?? {}) }),
-
-        getText: (url, init) =>
-            // si querés, esto podría mappear ResponseSpec -> bodyText con asyncMap
-            // pero lo dejo directo para que se entienda
-            // @ts-ignore: reemplazá con tu asyncMap si lo tenés importado
-            send({ url, method: "GET", ...(init ?? {}) }).map((r: ResponseSpec) => r.bodyText),
-
-        getJson: <A>(url: string, init?: Omit<RequestInit, "method">) =>
-            // @ts-ignore idem: reemplazá con tu composición real (flatMap/map)
-            send({ url, method: "GET", ...(init ?? {}) }).map((r: ResponseSpec) => JSON.parse(r.bodyText) as A),
-
-        postJson: (url, bodyObj, init) =>
-            send({
-                url,
-                method: "POST",
-                headers: { "content-type": "application/json", ...(init?.headers ?? {}) },
-                body: JSON.stringify(bodyObj),
-                ...(init ?? {}),
-            }),
-    };
 }
+
+// util mini: map y mapTry (sin depender de .map en Async)
+export const mapAsync = <R, E, A, B>(fa: Async<R, E, A>, f: (a: A) => B): Async<R, E, B> =>
+    asyncFlatMap(fa, (a) => asyncSucceed(f(a)));
+
+export const mapTryAsync = <R, E, A, B>(
+    fa: Async<R, E, A>,
+    f: (a: A) => B
+): Async<R, E, B> =>
+    asyncFlatMap(fa, (a) =>
+        asyncSync(() => f(a)) as any // asyncSync captura throw
+    );

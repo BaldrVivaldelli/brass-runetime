@@ -282,8 +282,18 @@ export class RuntimeFiber<R, E, A> implements Fiber<E, A> {
                     if (done) return;
                     done = true;
 
-                    // siempre reanudar vía scheduler (async boundary)
-                    this.scheduler.schedule(() => resume(exit), `fiber#${this.id}.async-resume`);
+                    // boundary async, pero en vez de ejecutar resume, marcá el estado y encolá la fiber
+                    this.scheduler.schedule(() => {
+                        if (this.result != null || this.closing != null) return;
+
+                        // guardo el exit como efecto actual
+                        this.current = exit._tag === "Success"
+                            ? ({ _tag: "Succeed", value: exit.value } as any)
+                            : ({ _tag: "Fail", error: exit.error } as any);
+
+                        // ahora sí: solo encolás la fiber una vez
+                        this.schedule("async-resume");
+                    }, `fiber#${this.id}.async-wakeup`);
                 };
 
                 const canceler = current.register(this.env, cb);

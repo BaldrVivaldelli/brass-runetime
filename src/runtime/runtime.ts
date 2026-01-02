@@ -120,6 +120,7 @@ export function tryPromiseAbortable<R, A>(
         isAbortError(e) ? { _tag: "Abort" } : { _tag: "PromiseRejected", reason: e }
     );
 }
+
 // 1) Overload: thunk usa SOLO signal (env = unknown)
 export function fromPromiseAbortable<E, A>(
     thunk: (signal: AbortSignal) => Promise<A>,

@@ -1,6 +1,6 @@
 import { globalScheduler } from "../runtime/scheduler";
 import { toPromise } from "../runtime/runtime";
-import { httpClient } from "../http/httpClient";
+import { httpClientWithMeta } from "../http/httpClient"; // ajustá el path según tu barrel/export
 
 type Post = {
     userId: number;
@@ -10,8 +10,8 @@ type Post = {
 };
 
 async function main() {
-    // Client base: SIN meta
-    const http = httpClient({
+    // Transparente: construye makeHttp(cfg) + withMeta()
+    const http = httpClientWithMeta({
         baseUrl: "https://jsonplaceholder.typicode.com",
     });
 
@@ -25,7 +25,8 @@ async function main() {
     console.log("returned isPromise:", p1 && typeof p1.then === "function");
 
     const r1 = await p1;
-    console.log("status:", r1.status);
+    console.log("status:", r1.status, r1.meta.statusText ?? "");
+    console.log("ms:", r1.meta.ms);
     console.log("title:", r1.body.title);
 
     // ---------- POST JSON ----------
@@ -44,18 +45,18 @@ async function main() {
     );
     console.log("returned isPromise:", p2 && typeof p2.then === "function");
 
-    const wire = await p2;
-    console.log("status:", wire.status);
-    console.log("bodyText:", wire.bodyText);
+    const r2 = await p2;
 
-    // Si querés parsear el body:
-    const created = JSON.parse(wire.bodyText) as Post;
-    console.log("created id:", created.id);
+    // OJO: postJson hoy devuelve WIRE (HttpWireResponse) en el archivo que te pasé.
+    // Si querés meta+json también para POST, abajo te dejo 2 opciones.
+    console.log("wire.status:", r2.status, r2.statusText ?? "");
+    console.log("wire.ms:", r2.ms);
+    console.log("wire.bodyText:", r2.bodyText);
 
     // ---------- RAW WIRE ----------
-    // const raw = await toPromise(http.get("/posts/1"), {});
-    // console.log("wire.status:", raw.status);
-    // console.log("wire.bodyText:", raw.bodyText);
+    // const wire = await toPromise(http.get("/posts/1"), {});
+    // console.log("wire.status:", wire.status, wire.statusText, "ms:", wire.ms);
+    // console.log("wire.bodyText:", wire.bodyText);
 }
 
 main().catch((e) => {
