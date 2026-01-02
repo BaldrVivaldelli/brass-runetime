@@ -50,7 +50,7 @@ Branch containing recent work: `feature/buffer-pipes`.
 - [x] Structured concurrency: `race`, `zipPar`, `collectAllPar`
 - [x] ZStream-like core (pull-based, resource-aware)
 - [x] Buffering in streams (bounded/backpressure modes)
-- [ ] Merge / zipPar of streams
+- [x] Merge / zipPar of streams
 - [ ] Hubs / Broadcast / Multicast
 - [ ] Pipelines (`ZPipeline`-style)
 - [ ] Advanced Channels / Sinks
