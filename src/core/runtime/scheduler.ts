@@ -1,69 +1,85 @@
+// scheduler.ts
+import { RingBuffer } from "./ringBuffer";
+
 export type Task = () => void;
 
-type TaggedTask = {
-    tag: string;
-    task: Task;
-};
+type TaggedTask = { tag: string; task: Task };
+
+// Tunables
+const FLUSH_BUDGET = 2048;      // max tasks por flush
+const MICRO_THRESHOLD = 4096;   // si backlog supera esto, preferí macro
+
+const scheduleMacro = (() => {
+    // Node
+    if (typeof (globalThis as any).setImmediate === "function") {
+        return (f: () => void) => (globalThis as any).setImmediate(f);
+    }
+    // Browser/Node
+    if (typeof (globalThis as any).MessageChannel === "function") {
+        const ch = new (globalThis as any).MessageChannel();
+        let cb: null | (() => void) = null;
+        ch.port1.onmessage = () => { const f = cb; cb = null; f?.(); };
+        return (f: () => void) => { cb = f; ch.port2.postMessage(0); };
+    }
+    return (f: () => void) => setTimeout(f, 0);
+})();
 
 export class Scheduler {
-    private queue: TaggedTask[] = [];
+    private queue = new RingBuffer<TaggedTask>(1024);
+
     private flushing = false;
-    private requested = false;
+    private scheduled = false; // hay un flush ya programado
 
     schedule(task: Task, tag: string = "anonymous"): void {
-        console.log("[Scheduler.schedule] typeof task =", typeof task, "tag=", tag);
-
-        if (typeof task !== "function") {
-            console.error("[Scheduler.schedule] NON-FUNCTION TASK!", { tag, task });
-            return;
-        }
+        if (typeof task !== "function") return;
 
         this.queue.push({ tag, task });
-        this.requestFlush();
-        console.log("SCHEDULER", {
-            flushing: this.flushing,
-            q: this.queue.length,
-            next: this.queue[0]?.tag,
-            head: this.queue.slice(0, 5).map(t => t.tag),
-        });
+
+        // si estamos adentro de flush, no programes más: el loop ya está drenando
+        if (this.flushing) return;
+
+        if (!this.scheduled) {
+            this.scheduled = true;
+            const kind = this.queue.length > MICRO_THRESHOLD ? "macro" : "micro";
+            this.requestFlush(kind);
+        }
     }
 
-    private requestFlush(): void {
-        console.log("requestFlush", { flushing: this.flushing, requested: this.requested, q: this.queue.length });
-
-        if (this.flushing) return;
-        if (this.requested) return;
-        this.requested = true;
-
-        queueMicrotask(() => {
-            console.log(">> microtask fired", { flushing: this.flushing, requested: this.requested, q: this.queue.length });
-            this.flush();
-        });
+    private requestFlush(kind: "micro" | "macro"): void {
+        if (kind === "micro") queueMicrotask(() => this.flush());
+        else scheduleMacro(() => this.flush());
     }
 
     private flush(): void {
-        console.log("FLUSH enter", { flushing: this.flushing, requested: this.requested, q: this.queue.length });
-
         if (this.flushing) return;
+
         this.flushing = true;
-        this.requested = false;
+        this.scheduled = false;
+
+        let ran = 0;
 
         try {
-            while (this.queue.length > 0) {
-                const item = this.queue.shift()!;
-                console.log("[flush] dequeued", { tag: item.tag, typeofTask: typeof item.task });
-
-                try {
-                    console.log("TASK typeof", typeof item.task)
-                    item.task(); // <- si esto falla, lo vas a ver
-                } catch (e) {
-                    console.error("[flush] task threw", e);
-                }
+            while (ran < FLUSH_BUDGET) {
+                const item = this.queue.shift();
+                if (!item) break;
+                ran++;
+                try { item.task(); }
+                catch (e) { console.error(`[Scheduler] task threw (tag=${item.tag})`, e); }
             }
         } finally {
             this.flushing = false;
-            console.log("FLUSH exit", { requested: this.requested, q: this.queue.length });
-            if (this.queue.length > 0) this.requestFlush();
+
+            if (this.queue.length > 0 && !this.scheduled) {
+                this.scheduled = true;
+
+                // si agotamos budget o hay backlog => yield al event loop
+                const kind =
+                    ran >= FLUSH_BUDGET || this.queue.length > MICRO_THRESHOLD
+                        ? "macro"
+                        : "micro";
+
+                this.requestFlush(kind);
+            }
         }
     }
 }

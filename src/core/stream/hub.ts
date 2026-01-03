@@ -4,12 +4,10 @@ import {
     asyncSucceed,
     asyncFlatMap,
     asyncTotal,
-    asyncSync, acquireRelease, asyncMapError
+    asyncSync, asyncMapError
 } from "../types/asyncEffect";
-import {bounded, Queue, QueueClosed, Strategy} from "./queue";
-import {foreachStream, fromPull, managedStream, unwrapScoped, ZStream} from "./stream";
-import {Scope} from "../runtime/scope";
-import {Exit} from "../types/effect";
+import {bounded, Queue, Strategy} from "./queue";
+import {foreachStream, fromPull, managedStream, ZStream} from "./stream";
 import {none, Option} from "../types/option";
 
 export type HubStrategy = "BackPressure" | "Dropping" | "Sliding";

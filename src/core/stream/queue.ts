@@ -2,6 +2,8 @@
 import { async, Async, asyncSync } from "../types/asyncEffect";
 import { Exit } from "../types/effect";
 import { Canceler } from "../types/cancel";
+import {RingBuffer} from "../runtime/ringBuffer";
+import {LinkedQueue} from "../runtime/linkedQueue";
 
 export type Strategy = "backpressure" | "dropping" | "sliding";
 
@@ -22,42 +24,38 @@ export function bounded<A>(
 }
 
 function makeQueue<A>(capacity: number, strategy: Strategy): Queue<A> {
-    const items: A[] = [];
+    const items = new RingBuffer<A>(capacity);
     let closed = false;
-
-    const takers: Array<(a: A) => void> = [];
-    const offerWaiters: Array<{ a: A; cb: (ok: boolean) => void }> = [];
 
     const QueueClosedErr: QueueClosed = { _tag: "QueueClosed" };
 
-    const removeTaker = (cb: (a: A) => void) => {
-        const i = takers.indexOf(cb);
-        if (i >= 0) takers.splice(i, 1);
-    };
+    type OfferWaiter = { a: A; cb: (ok: boolean) => void };
+    type Taker = (exit: Exit<QueueClosed, A>) => void;
 
-    const removeOfferWaiter = (w: { a: A; cb: (ok: boolean) => void }) => {
-        const i = offerWaiters.indexOf(w);
-        if (i >= 0) offerWaiters.splice(i, 1);
-    };
+    const offerWaiters = new LinkedQueue<OfferWaiter>();
+    const takers = new LinkedQueue<Taker>();
 
     const flush = () => {
+        // 1) entregar items a takers
         while (takers.length > 0 && items.length > 0) {
             const t = takers.shift()!;
             const a = items.shift()!;
-            t(a);
+            t({ _tag: "Success", value: a });
         }
 
+        // 2) si hay espacio, meter offers esperando (solo si no hay takers esperando)
         while (offerWaiters.length > 0 && items.length < capacity && takers.length === 0) {
             const w = offerWaiters.shift()!;
             items.push(w.a);
             w.cb(true);
         }
 
+        // 3) emparejar takers con offerWaiters directo (sin tocar items)
         while (takers.length > 0 && offerWaiters.length > 0) {
             const t = takers.shift()!;
             const w = offerWaiters.shift()!;
-            t(w.a);
             w.cb(true);
+            t({ _tag: "Success", value: w.a });
         }
     };
 
@@ -65,143 +63,86 @@ function makeQueue<A>(capacity: number, strategy: Strategy): Queue<A> {
         if (closed) return;
         closed = true;
 
-        // Despertar a todos los takers: en ZIO take falla con QueueShutdown/QueueClosed
+        // fallar todos los takers suspendidos
         while (takers.length > 0) {
             const t = takers.shift()!;
-            // No tenemos canal de error acá (taker solo recibe A),
-            // así que el error lo resolvemos desde take (cb Failure) al registrarse.
-            // Para eso, en shutdown llamamos a esos callbacks vía un "sentinel" NO es viable.
-            // Entonces: en este diseño, el taker registrado debe cerrarse desde take()
-            // cuando detecta closed. Para no dejar fibers colgados, acá NO usamos taker(a).
-            //
-            // Solución correcta: guardar "cb Exit" en takers, no (a)=>void.
-            // Pero para corregirte con mínimos cambios, convertimos takers a Exit-cb en take().
-            //
-            // 👉 Como YA estamos corrigiendo el archivo, abajo cambiamos takers a Exit-cb.
-            // Este while queda vacío con ese cambio (ver implementación final abajo).
-            void t;
-        }
-
-        // Despertar a todos los offerWaiters: offer retorna boolean => false si se cerró
-        while (offerWaiters.length > 0) {
-            const w = offerWaiters.shift()!;
-            w.cb(false);
-        }
-
-        items.length = 0;
-    };
-
-    // ✅ versión final: takers guardan cb Exit para poder fallar al cerrar
-    const takersExit: Array<(exit: Exit<QueueClosed, A>) => void> = [];
-
-    const removeTakerExit = (cb: (exit: Exit<QueueClosed, A>) => void) => {
-        const i = takersExit.indexOf(cb);
-        if (i >= 0) takersExit.splice(i, 1);
-    };
-
-    const flush2 = () => {
-        while (takersExit.length > 0 && items.length > 0) {
-            const t = takersExit.shift()!;
-            const a = items.shift()!;
-            t({ _tag: "Success", value: a });
-        }
-
-        while (offerWaiters.length > 0 && items.length < capacity && takersExit.length === 0) {
-            const w = offerWaiters.shift()!;
-            items.push(w.a);
-            w.cb(true);
-        }
-
-        while (takersExit.length > 0 && offerWaiters.length > 0) {
-            const t = takersExit.shift()!;
-            const w = offerWaiters.shift()!;
-            w.cb(true);
-            t({ _tag: "Success", value: w.a });
-        }
-    };
-
-    const shutdown2 = () => {
-        if (closed) return;
-        closed = true;
-
-        // fallar a todos los takers suspendidos
-        while (takersExit.length > 0) {
-            const t = takersExit.shift()!;
             t({ _tag: "Failure", error: QueueClosedErr });
         }
 
-        // completar offers suspendidos con false
+        // liberar offers suspendidos
         while (offerWaiters.length > 0) {
             const w = offerWaiters.shift()!;
             w.cb(false);
         }
 
-        items.length = 0;
+        items.clear();
     };
 
     return {
-        shutdown: shutdown2,
-
         size: () => items.length,
 
-        offer: (a: A) =>
-            async((_env: any, cb: (exit: Exit<never, boolean>) => void): void | Canceler => {
+        shutdown,
+
+        offer: (a) =>
+            async((_env, cb) => {
                 if (closed) {
                     cb({ _tag: "Success", value: false });
                     return;
                 }
 
-                // entregar directo si hay taker esperando
-                if (takersExit.length > 0) {
-                    const t = takersExit.shift()!;
+                // si hay taker esperando, entrego directo
+                if (takers.length > 0) {
+                    const t = takers.shift()!;
                     t({ _tag: "Success", value: a });
                     cb({ _tag: "Success", value: true });
                     return;
                 }
 
-                // hay espacio -> encolar
+                // hay espacio
                 if (items.length < capacity) {
                     items.push(a);
                     cb({ _tag: "Success", value: true });
+                    flush();
                     return;
                 }
 
-                // lleno -> estrategia
+                // lleno: estrategia
                 if (strategy === "dropping") {
                     cb({ _tag: "Success", value: false });
                     return;
                 }
 
                 if (strategy === "sliding") {
-                    items.shift();
+                    // drop oldest, keep newest
+                    items.shift(); // O(1) amortizado en RingBuffer
                     items.push(a);
                     cb({ _tag: "Success", value: true });
+                    flush();
                     return;
                 }
 
-                // backpressure: suspender
-                const waiter = { a, cb: (ok: boolean) => cb({ _tag: "Success", value: ok }) };
-                offerWaiters.push(waiter);
+                // backpressure: suspender offer
+                const node = offerWaiters.push({
+                    a,
+                    cb: (ok) => cb({ _tag: "Success", value: ok }),
+                });
 
-                // canceler: saca al waiter si se interrumpe
-                return () => removeOfferWaiter(waiter);
+                const canceler: Canceler = () => {
+                    offerWaiters.remove(node);
+                };
+                return canceler;
             }),
 
         take: () =>
-            async((_env: any, cb: (exit: Exit<QueueClosed, A>) => void): void | Canceler => {
-                if (closed) {
-                    cb({ _tag: "Failure", error: QueueClosedErr });
-                    return;
-                }
-
+            async((_env, cb) => {
                 if (items.length > 0) {
                     const a = items.shift()!;
                     cb({ _tag: "Success", value: a });
-                    flush2();
+                    flush();
                     return;
                 }
 
-                // si hay offerWaiter esperando, casar directo
+                // si hay offers esperando, consumimos directo
                 if (offerWaiters.length > 0) {
                     const w = offerWaiters.shift()!;
                     w.cb(true);
@@ -209,11 +150,19 @@ function makeQueue<A>(capacity: number, strategy: Strategy): Queue<A> {
                     return;
                 }
 
-                const taker = (exit: Exit<QueueClosed, A>) => cb(exit);
-                takersExit.push(taker);
+                if (closed) {
+                    cb({ _tag: "Failure", error: QueueClosedErr });
+                    return;
+                }
 
-                // canceler: saca al taker si se interrumpe
-                return () => removeTakerExit(taker);
+                // suspender taker
+                const taker: Taker = (exit) => cb(exit);
+                const node = takers.push(taker);
+
+                const canceler: Canceler = () => {
+                    takers.remove(node);
+                };
+                return canceler;
             }),
     };
 }

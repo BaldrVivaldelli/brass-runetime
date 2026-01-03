@@ -140,16 +140,12 @@ function streamToRaceWithHandler<R, E, A>(
     scope: Scope<R>
 ) => Async<R, Option<E> | Interrupted, [A, ZStream<R, E, A>]> {
     return (exit, otherFiber, scope) => {
-        console.log(
-            `[mergePull#${id}] winner=${winnerSide} exit=${exit._tag}`
-        );
-
         if (exit._tag === "Failure") {
-            console.log(`[mergePull#${id}] failure error=`, exit.error);
+            /*console.log(`[mergePull#${id}] failure error=`, exit.error);*/
         }
 
         if (exit._tag === "Success") {
-            console.log(`[mergePull#${id}] success -> interrupt other`);
+            /*console.log(`[mergePull#${id}] success -> interrupt other`);*/
         }
         if (exit._tag === "Success") {
             const [a, tailWin] = exit.value;
@@ -194,17 +190,13 @@ function makeMergePull<R, E, A>(
 ): Async<R, Option<E>, [A, ZStream<R, E, A>]> {
     return async((env, cb) => {
         const id = ++mergePullId;
-        console.log(`[mergePull#${id}] start flip=${flip}`);
         const scope = new Scope(env);
 
-        console.log(`[mergePull#${id}] built pulls`);
         const leftPull  = uncons(onLeft);
         const rightPull = uncons(onRight);
 
-        console.log(`[mergePull#${id}] built pulls`);
         const onLeftHandler  = streamToRaceWithHandler("L", onLeft, onRight, flip,id);
         const onRightHandler = streamToRaceWithHandler("R", onLeft, onRight, flip,id);
-        console.log(`[mergePull#${id}] calling raceWith`);
         const handler = raceWith(
             leftPull,
             rightPull,
@@ -212,11 +204,8 @@ function makeMergePull<R, E, A>(
             onLeftHandler,
             onRightHandler
         );
-        console.log(`[mergePull#${id}] forking handler`);
         scope.fork(handler, env).join((ex) => {
-            console.log(`[mergePull#${id}] handler joined exit=${ex._tag}`);
             scope.close(ex as any);
-            console.log(`[mergePull#${id}] scope closed, calling cb`);
             cb(ex as any);
         });
     });
@@ -246,7 +235,6 @@ export function uncons<R, E, A>(
             );
 
         case "FromPull":
-            console.log("[uncons] FromPull");
             return self.pull;
 
         case "Concat":
@@ -272,7 +260,6 @@ export function uncons<R, E, A>(
                 )
             )
         case "Merge":
-            console.log("[makeMergePull] defined");
             return makeMergePull(self.left, self.right, self.flip,0);
         case "Scoped":
             return async((env, cb) => {

@@ -35,7 +35,31 @@ export type Fiber<E, A> = {
 
 let nextId: FiberId = 1;
 
+// cuántos opcodes sync procesamos antes de ceder al scheduler
+const DEFAULT_BUDGET = 1024;
 
+// evita que un flatMap "left-associated" empuje N frames antes de correr
+function reassociateFlatMap<R, E, A>(
+    cur: Async<R, E, A>
+): Async<R, E, A> {
+    // Rotación: FlatMap(FlatMap(x,f), g) => FlatMap(x, a => FlatMap(f(a), g))
+    let current = cur;
+    while (current._tag === "FlatMap" && current.first._tag === "FlatMap") {
+        const inner = current.first;
+        const g = current.andThen;
+
+        current = {
+            _tag: "FlatMap",
+            first: inner.first,
+            andThen: (a: any) => ({
+                _tag: "FlatMap",
+                first: inner.andThen(a),
+                andThen: g,
+            }),
+        } as any;
+    }
+    return current;
+}
 
 export class RuntimeFiber<R, E, A> implements Fiber<E, A> {
     readonly id: FiberId;
@@ -71,6 +95,7 @@ export class RuntimeFiber<R, E, A> implements Fiber<E, A> {
         this.env = env;
     }
 
+
     addFinalizer(f: (exit: Exit<E | Interrupted, A>) => void): void {
         this.fiberFinalizers.push(f);
     }
@@ -93,13 +118,13 @@ export class RuntimeFiber<R, E, A> implements Fiber<E, A> {
     }
 
     schedule(tag: string = "step"): void {
-        console.log("[fiber.schedule]", {
+        /*console.log("[fiber.schedule]", {
             fiber: this.id,
             tag,
             runState: this.runState,
             schedulerCtor: this.scheduler?.constructor?.name,
             schedulerScheduleType: typeof (this.scheduler as any)?.schedule,
-        });
+        });*/
 
         // ya terminó o ya está en cola: no hacer nada
         if (this.runState === RUN.DONE || this.runState === RUN.QUEUED) return;
@@ -108,7 +133,7 @@ export class RuntimeFiber<R, E, A> implements Fiber<E, A> {
         this.runState = RUN.QUEUED;
 
         this.scheduler.schedule(() => {
-            console.log("[fiber.task] running", this.id);
+            /*console.log("[fiber.task] running", this.id);*/
 
             if (this.runState === RUN.DONE) return;
             this.runState = RUN.RUNNING;
@@ -182,140 +207,103 @@ export class RuntimeFiber<R, E, A> implements Fiber<E, A> {
     }
 
     step(): StepDecision {
-        console.log("[fiber.step] enter", {
-            fiber: this.id,
-            current: this.current?._tag,
-            result: this.result != null,
-            interrupted: this.interrupted,
-            closing: this.closing != null,
-            finishing: this.finishing,
-            stack: this.stack.length,
-        });
+        // Si querés, parametrizalo por env/flag/debug.
+        let budget = DEFAULT_BUDGET;
 
-        let decision: StepDecision = STEP.CONTINUE;
+        while (budget-- > 0) {
+            // ya terminó
+            if (this.result != null) return STEP.DONE;
 
-        // ya terminó
-        if (this.result != null) {
-            decision = STEP.DONE;
-            return decision;
-        }
-
-        // interrupción gana si no estamos cerrando
-        if (this.interrupted && this.closing == null) {
-            console.log("[fiber.step] interrupted: failing now", { fiber: this.id });
-            this.notify({ _tag: "Failure", error: { _tag: "Interrupted" } as any } as any);
-            decision = STEP.DONE;
-            return decision;
-        }
-
-        const current = this.current;
-
-        switch (current._tag) {
-            case "Succeed": {
-                console.log("[fiber.step] Succeed", { fiber: this.id });
-                this.onSuccess(current.value);
-                break;
+            // interrupción gana si no estamos cerrando
+            if (this.interrupted && this.closing == null) {
+                this.notify({ _tag: "Failure", error: { _tag: "Interrupted" } as any } as any);
+                return STEP.DONE;
             }
 
-            case "Fail": {
-                console.log("[fiber.step] Fail", { fiber: this.id });
-                this.onFailure(current.error);
-                break;
-            }
+            // IMPORTANTE: re-asociar flatMap para stack-safety tipo ZIO
+            const current = reassociateFlatMap(this.current);
 
-            case "Sync": {
-                console.log("[fiber.step] Sync", { fiber: this.id });
-                try {
-                    const v = current.thunk(this.env);
-                    console.log("[fiber.step] Sync success", { fiber: this.id });
-                    this.onSuccess(v);
-                } catch (e) {
-                    console.log("[fiber.step] Sync threw", { fiber: this.id, e });
-                    this.onFailure(e);
-                }
-                break;
-            }
-
-            case "FlatMap": {
-                console.log("[fiber.step] FlatMap push cont", { fiber: this.id });
-                this.stack.push({ _tag: "SuccessCont", k: current.andThen });
-                this.current = current.first;
-                break;
-            }
-
-            case "Fold": {
-                console.log("[fiber.step] Fold push cont", { fiber: this.id });
-                this.stack.push({
-                    _tag: "FoldCont",
-                    onFailure: current.onFailure,
-                    onSuccess: current.onSuccess,
-                });
-                this.current = current.first;
-                break;
-            }
-
-            case "Async": {
-                // si estás “finishing”, no queremos realmente suspender (tu lógica original)
-                if (this.finishing) {
+            switch (current._tag) {
+                case "Succeed": {
+                    this.onSuccess((current as any).value);
                     break;
                 }
 
-                let done = false;
-
-                const resume = (exit: Exit<any, any>) => {
-                    // Si ya terminó o está cerrando, ignorar
-                    if (this.result != null || this.closing != null) return;
-
-                    // Si fue interrumpido, gana interrupción
-                    if (this.interrupted) {
-                        this.onFailure({ _tag: "Interrupted" } as Interrupted);
-                        return;
-                    }
-
-                    exit._tag === "Success" ? this.onSuccess(exit.value) : this.onFailure(exit.error);
-
-                    // seguir el loop
-                    this.schedule("async-resume");
-                };
-
-                const cb = (exit: Exit<any, any>) => {
-                    if (done) return;
-                    done = true;
-
-                    // boundary async, pero en vez de ejecutar resume, marcá el estado y encolá la fiber
-                    this.scheduler.schedule(() => {
-                        if (this.result != null || this.closing != null) return;
-
-                        // guardo el exit como efecto actual
-                        this.current = exit._tag === "Success"
-                            ? ({ _tag: "Succeed", value: exit.value } as any)
-                            : ({ _tag: "Fail", error: exit.error } as any);
-
-                        // ahora sí: solo encolás la fiber una vez
-                        this.schedule("async-resume");
-                    }, `fiber#${this.id}.async-wakeup`);
-                };
-
-                const canceler = current.register(this.env, cb);
-
-                if (typeof canceler === "function") {
-                    this.addFinalizer(() => {
-                        done = true;
-                        try {
-                            canceler();
-                        } catch {}
-                    });
+                case "Fail": {
+                    this.onFailure((current as any).error);
+                    break;
                 }
 
-                decision = STEP.SUSPEND;
-                break;
+                case "Sync": {
+                    try {
+                        const v = (current as any).thunk(this.env);
+                        this.onSuccess(v);
+                    } catch (e) {
+                        this.onFailure(e);
+                    }
+                    break;
+                }
+
+                case "FlatMap": {
+                    // (ya re-asociado arriba)
+                    this.stack.push({ _tag: "SuccessCont", k: (current as any).andThen });
+                    this.current = (current as any).first;
+                    break;
+                }
+
+                case "Fold": {
+                    this.stack.push({
+                        _tag: "FoldCont",
+                        onFailure: (current as any).onFailure,
+                        onSuccess: (current as any).onSuccess,
+                    });
+                    this.current = (current as any).first;
+                    break;
+                }
+
+                case "Async": {
+                    // boundary async: acá sí suspendemos
+                    if (this.finishing) {
+                        // normalmente no vas a llegar acá con finishing=true porque notify pone result,
+                        // pero lo mantenemos por compatibilidad con tu lógica.
+                        return this.result != null ? STEP.DONE : STEP.CONTINUE;
+                    }
+
+                    let done = false;
+
+                    const cb = (exit: Exit<any, any>) => {
+                        if (done) return;
+                        done = true;
+
+                        if (this.result != null || this.closing != null) return;
+
+                        this.current =
+                            exit._tag === "Success"
+                                ? ({ _tag: "Succeed", value: exit.value } as any)
+                                : ({ _tag: "Fail", error: exit.error } as any);
+
+                        this.schedule("async-resume");
+                    };
+
+
+                    const canceler = (current as any).register(this.env, cb);
+
+                    if (typeof canceler === "function") {
+                        this.addFinalizer(() => {
+                            done = true;
+                            try {
+                                canceler();
+                            } catch {}
+                        });
+                    }
+
+                    return STEP.SUSPEND;
+                }
             }
         }
 
-        // post-check final
-        if (this.result != null) decision = STEP.DONE;
-
-        return decision;
+        // si llegamos acá, agotamos budget => cedemos cooperativamente
+        return this.result != null ? STEP.DONE : STEP.CONTINUE;
     }
 }
 
