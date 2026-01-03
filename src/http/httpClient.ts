@@ -1,5 +1,5 @@
 // src/http/httpClient.ts
-import { Async } from "../types/asyncEffect";
+import { Async } from "../core/types/asyncEffect";
 import {
     HttpClient,
     HttpError,

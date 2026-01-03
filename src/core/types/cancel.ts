@@ -20,10 +20,7 @@ export function makeCancelToken(): CancelToken & { cancel: Canceler } {
     const cancel = () => {
         if (cancelled) return;
         cancelled = true;
-        // ejecuta y limpia
-        for (const f of listeners) {
-            try { f(); } catch { /* opcional: log */ }
-        }
+        listeners.forEach((f) => f());
         listeners.clear();
     };
 

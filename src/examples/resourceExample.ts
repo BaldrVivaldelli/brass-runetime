@@ -1,8 +1,8 @@
 // src/resourceExample.ts
 
-import {withScope} from "../runtime/scope";
-import {acquireRelease, async, Async, asyncFlatMap, asyncSucceed, asyncTotal} from "../types/asyncEffect";
-import {Exit} from "../types/effect";
+import {withScope} from "../core/runtime/scope";
+import {acquireRelease, async, Async, asyncFlatMap, asyncSucceed, asyncTotal} from "../core/types/asyncEffect";
+import {Exit} from "../core/types/effect";
 
 type FileHandle = {
     name: string;

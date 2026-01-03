@@ -1,5 +1,5 @@
-import {async} from "../types/asyncEffect";
-import {unsafeRunAsync} from "../runtime/runtime";
+import {async} from "../core/types/asyncEffect";
+import {unsafeRunAsync} from "../core/runtime/runtime";
 
 let ticks = 0;
 

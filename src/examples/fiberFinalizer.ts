@@ -1,7 +1,7 @@
 // fiberFinalizer.ts
-import { asyncFlatMap, asyncTotal } from "../types/asyncEffect";
+import { asyncFlatMap, asyncTotal } from "../core/types/asyncEffect";
 import { sleep } from "./demo";
-import {fork} from "../runtime/runtime";
+import {fork} from "../core/runtime/runtime";
 
 function formatExit(exit: any) {
     if (!exit || typeof exit !== "object") return String(exit);

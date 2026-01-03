@@ -1,5 +1,5 @@
-import { globalScheduler } from "../runtime/scheduler";
-import { toPromise } from "../runtime/runtime";
+import { globalScheduler } from "../core/runtime/scheduler";
+import { toPromise } from "../core/runtime/runtime";
 import { httpClientWithMeta } from "../http/httpClient"; // ajustá el path según tu barrel/export
 
 type Post = {

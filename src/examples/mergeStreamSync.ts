@@ -1,6 +1,6 @@
-import { collectStream, fromArray, merge } from "../stream/stream";
-import {toPromise} from "../runtime/runtime";
-import {Async} from "../types/asyncEffect";
+import { collectStream, fromArray, merge } from "../core/stream/stream";
+import {toPromise} from "../core/runtime/runtime";
+import {Async} from "../core/types/asyncEffect";
 
 async function main() {
     console.log("== merge test start ==");

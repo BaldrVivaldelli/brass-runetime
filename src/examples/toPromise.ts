@@ -1,6 +1,6 @@
-import {buffer} from "../stream/buffer";
-import {collectStream, rangeStream} from "../stream/stream";
-import {toPromise} from "../runtime/runtime";
+import {buffer} from "../core/stream/buffer";
+import {collectStream, rangeStream} from "../core/stream/stream";
+import {toPromise} from "../core/runtime/runtime";
 
 
 async function testBuffer() {

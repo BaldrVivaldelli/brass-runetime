@@ -1,6 +1,6 @@
 // src/http/client.ts
-import { Async, asyncFlatMap, asyncSucceed, asyncSync } from "../types/asyncEffect";
-import { fromPromiseAbortable } from "../runtime/runtime";
+import { Async, asyncFlatMap, asyncSucceed, asyncSync } from "../core/types/asyncEffect";
+import { fromPromiseAbortable } from "../core/runtime/runtime";
 
 export type HttpError =
     | { _tag: "Abort" }
