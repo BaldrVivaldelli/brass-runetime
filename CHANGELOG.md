@@ -1,3 +1,10 @@
+## [1.6.1](https://github.com/BaldrVivaldelli/brass-runtime/compare/v1.6.0...v1.6.1) (2026-01-04)
+
+
+### Bug Fixes
+
+* trigger new version ([997e20f](https://github.com/BaldrVivaldelli/brass-runtime/commit/997e20fbc9b3895d72e232caf2b20e18ceecadbc))
+
 # [1.6.0](https://github.com/BaldrVivaldelli/brass-runtime/compare/v1.5.1...v1.6.0) (2026-01-03)
 
 
