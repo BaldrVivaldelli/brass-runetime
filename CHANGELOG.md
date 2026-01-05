@@ -1,3 +1,5 @@
+## [1.6.2](https://github.com/BaldrVivaldelli/brass-runtime/compare/v1.6.1...v1.6.2) (2026-01-05)
+
 ## [1.6.1](https://github.com/BaldrVivaldelli/brass-runtime/compare/v1.6.0...v1.6.1) (2026-01-04)
 
 
