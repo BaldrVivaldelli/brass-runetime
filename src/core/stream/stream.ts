@@ -7,11 +7,20 @@ import {
     map,
     mapError,
     orElseOptional,
-    succeed,
+    succeed, sync,
     ZIO,
 } from "../types/effect.js";
 import { none, Option, some } from "../types/option.js";
-import {async, Async, asyncFail, asyncFlatMap, asyncFold, asyncMapError, asyncSucceed} from "../types/asyncEffect";
+import {
+    async,
+    Async,
+    asyncFail,
+    asyncFlatMap,
+    asyncFold,
+    asyncMapError,
+    asyncSucceed,
+    asyncSync
+} from "../types/asyncEffect";
 import {Scope} from "../runtime/scope";
 import {raceWith} from "./structuredConcurrency";
 import {Fiber, Interrupted} from "../runtime/fiber";
@@ -61,6 +70,9 @@ export type ZStream<R, E, A> =
     | Flatten<R, E, A>
     | Merge<R, E, A>
     | Scoped<R, E, A>;
+
+
+type Normalize<E> = (u: unknown) => E;
 
 const widenOpt = <E1, E2>(opt: Option<E1>): Option<E1 | E2> =>
     opt._tag === "None" ? none : some(opt.value as E1 | E2);
@@ -438,4 +450,60 @@ export function collectStream<R, E, A>(stream: ZStream<R, E, A>): ZIO<R, E, A[]>
 }
 
 
+function readerStream<E>(
+    reader: ReadableStreamDefaultReader<Uint8Array>,
+    normalizeError: Normalize<E>
+): ZStream<unknown, E, Uint8Array> {
+    const pull: ZIO<
+        unknown,
+        Option<E>,
+        [Uint8Array, ZStream<unknown, E, Uint8Array>]
+    > =
+        async((_, cb) => {
+            reader.read()
+                .then(({ done, value }) => {
+                    if (done) {
+                        cb({ _tag: "Failure", error: none }); // fin normal
+                        return;
+                    }
+                    cb({
+                        _tag: "Success",
+                        value: [value as Uint8Array, fromPull(pull)]
+                    });
+                })
+                .catch((e) => {
+                    // Error real => Some(e)
+                    cb({ _tag: "Failure", error: some(normalizeError(e)) });
+                });
+        }) as any;
 
+    return fromPull(pull);
+}
+
+export function streamFromReadableStream<E>(
+    body: ReadableStream<Uint8Array> | null | undefined,
+    normalizeError: Normalize<E>
+): ZStream<unknown, E, Uint8Array> {
+    if (!body) return emptyStream<unknown, E, Uint8Array>();
+
+    // Necesitamos que release vea el reader: lo guardamos en un closure.
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+
+    return unwrapScoped(
+        // acquire: produce un ZStream
+        sync(() => {
+            reader = body.getReader();
+            return readerStream(reader, normalizeError);
+        }) as any,
+        // release: se corre en fin / error / interrupción
+        () =>
+            asyncSync(() => {
+                try {
+                    // cancel() es idempotente-ish; si ya terminó no pasa nada
+                    reader?.cancel();
+                } catch {
+                    // ignorar
+                }
+            }) as any
+    );
+}

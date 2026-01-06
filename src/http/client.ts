@@ -1,6 +1,10 @@
 // src/http/client.ts
-import { Async, asyncFlatMap, asyncSucceed, asyncSync } from "../core/types/asyncEffect";
+import {async, Async, asyncFlatMap, asyncSucceed, asyncSync} from "../core/types/asyncEffect";
 import { fromPromiseAbortable } from "../core/runtime/runtime";
+import {none, Option, some} from "../core/types/option";
+import {succeed, ZIO} from "../core/types/effect";
+import { ZStream, streamFromReadableStream } from "../core/stream/stream";
+
 
 export type HttpError =
     | { _tag: "Abort" }
@@ -38,7 +42,54 @@ export type MakeHttpConfig = {
     headers?: Record<string, string>;
 };
 
+
+export type HttpWireResponseStream = {
+    status: number;
+    statusText: string;
+    headers: Record<string, string>;
+    body: ZStream<unknown, HttpError, Uint8Array>;
+    ms: number;
+};
+
+export type HttpClientStream = (req: HttpRequest) => Async<unknown, HttpError, HttpWireResponseStream>;
+
 export type HttpClient = (req: HttpRequest) => Async<unknown, HttpError, HttpWireResponse>;
+
+export function makeHttpStream(cfg: MakeHttpConfig = {}): HttpClientStream {
+    const baseUrl = cfg.baseUrl ?? "";
+    const defaultHeaders = cfg.headers ?? {};
+
+    return (req) =>
+        fromPromiseAbortable<HttpError, HttpWireResponseStream>(
+            async (signal) => {
+                const url = new URL(req.url, baseUrl);
+                const started = performance.now();
+
+                const res = await fetch(url, {
+                    ...(req.init ?? {}),
+                    method: req.method,
+                    headers: { ...defaultHeaders, ...(req.headers ?? {}) },
+                    body: req.body,
+                    signal,
+                });
+
+                const headers: Record<string, string> = {};
+                res.headers.forEach((v, k) => (headers[k] = v));
+
+                const body = streamFromReadableStream(res.body, normalizeHttpError);
+
+                return {
+                    status: res.status,
+                    statusText: res.statusText,
+                    headers,
+                    body,
+                    ms: Math.round(performance.now() - started),
+                };
+            },
+            normalizeHttpError
+        );
+}
+
 
 const normalizeHttpError = (e: unknown): HttpError => {
     if (e instanceof DOMException && e.name === "AbortError") return { _tag: "Abort" };
