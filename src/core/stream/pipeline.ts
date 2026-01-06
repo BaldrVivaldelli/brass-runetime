@@ -15,7 +15,7 @@ import {
     asyncSucceed,
 } from "../types/asyncEffect";
 import { none, Option, some } from "../types/option";
-import { emptyStream, fromPull, uncons, ZStream } from "./stream";
+import {emptyStream, fromPull, uncons, widenOpt, ZStream} from "./stream";
 import { buffer as bufferStream } from "./buffer";
 
 /**
@@ -28,8 +28,7 @@ export type ZPipeline<Rp, Ep, In, Out> = <R, E>(
     input: ZStream<R, E, In>
 ) => ZStream<R & Rp, E | Ep, Out>;
 
-const widenOpt = <E1, E2>(opt: Option<E1>): Option<E1 | E2> =>
-    opt._tag === "None" ? none : some(opt.value as any);
+
 
 /** Apply a pipeline to a stream (alias of `pipeline(stream)`). */
 export function via<R, E, A, Rp, Ep, B>(

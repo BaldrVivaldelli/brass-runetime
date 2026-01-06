@@ -72,11 +72,9 @@ export type ZStream<R, E, A> =
     | Scoped<R, E, A>;
 
 
-type Normalize<E> = (u: unknown) => E;
-
-const widenOpt = <E1, E2>(opt: Option<E1>): Option<E1 | E2> =>
-    opt._tag === "None" ? none : some(opt.value as E1 | E2);
-
+export type Normalize<E> = (u: unknown) => E;
+export const widenOpt = <E1, E2>(opt: Option<E1>): Option<E1 | E2> =>
+    opt._tag === "None" ? none : some(opt.value as any);
 export const fromPull = <R, E, A>(
     pull: ZIO<R, Option<E>, [A, ZStream<R, E, A>]>
 ): ZStream<R, E, A> => ({

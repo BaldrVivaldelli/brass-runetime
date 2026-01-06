@@ -108,7 +108,7 @@ Examples:
 - [x] Bounded buffers & backpressure
 - [x] Stream merge / zip
 - [x] Hubs / Broadcast
-- [ ] Pipelines (`ZPipeline`-style)
+- [x] Pipelines (`ZPipeline`-style)
 
 ### Libraries
 - [x] HTTP client (`brass-http`)
