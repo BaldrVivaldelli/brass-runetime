@@ -1,186 +1,276 @@
 # agent.md — brass-runtime
 
-> Objetivo: que un LLM pueda orientarse rápido en este repo y hacer cambios sin romper las **invariantes semánticas** (no-Promise core, cancelación estructurada, cleanup determinístico).
+This document describes the **current architecture, invariants, and mental model**
+of brass-runtime. It is intended for contributors and for future maintainers.
 
-## Qué es este proyecto (TL;DR)
-
-`brass-runtime` es un runtime experimental “mini ZIO-like” en TypeScript:
-- Effects como valores (lazy, composables, referentially transparent)
-- Async **explícito** (la semántica no se apoya en `Promise` / `async` / `await`)
-- Concurrencia estructurada con **fibers + scopes + finalizers**
-- Scheduler cooperativo (ejecución “por pasos”)
-- Streams estilo ZStream con backpressure
-
-Este repo es “la base” (runtime + primitivas). Los módulos “de más alto nivel” se construyen **encima** (ej: HTTP), no se bakean en el core.
+brass-runtime is intentionally small, explicit, and opinionated.
 
 ---
 
-## Layout del repo (orientativo)
+## Core Philosophy
 
-- `src/`  
-  Implementación del runtime y librerías “encima” (ej: HTTP, streams, etc).
-    - `src/examples/` contiene ejemplos (p. ej. integraciones y streams).
-- `docs/`  
-  Documentación/guías (Getting Started, etc).
-- Build/config:
-    - `tsup.config.ts` (bundle/build)
-    - `tsconfig.*.json` (base + ESM/CJS/types)
-- Release:
-    - `.releaserc.json` + `CHANGELOG.md` (release automation / changelog)
+- **Effects are values**
+- **Async is explicit**
+- **Cancellation is mandatory**
+- **Concurrency is structured**
+- **Resources are scoped**
+- **Streams are first‑class**
+- **Streaming should be boring and safe**
 
-> Nota: si necesitás ubicar algo rápido, buscá por keywords (ver sección “Mapa mental / keywords”).
+If an async operation cannot be cancelled, it is considered a bug.
 
 ---
 
-## Invariantes (las “reglas de oro”)
+## Execution Model
 
-### 1) No Promises como semántica core
-- Evitá introducir `Promise` como *unidad de ejecución* del runtime.
-- Las integraciones con el ecosistema JS pueden usar Promises internamente, pero deben “puentearse” a `Async` (ver patrones).
+### Effects
 
-### 2) Laziness: no ejecutar efectos al construirlos
-- Si integrás algo que retorna `Promise`, preferí tomar un **thunk** `() => Promise<A>` y no el `Promise<A>` ya creado.
-- No disparar side-effects en construcción (solo cuando el fiber lo corre).
+The core abstraction is `Async<R, E, A>` (and `ZIO` aliases):
 
-### 3) Cancelación coherente y cleanup determinístico
-- Si una operación puede cancelarse, integrala con finalizers/AbortController.
-- Cuando un fiber se interrumpe o un scope se cierra:
-    - se cancelan hijos
-    - se corren finalizers (idealmente LIFO)
-    - se liberan recursos (via `Scope` / `acquireRelease`)
+- `R`: required environment
+- `E`: typed failure
+- `A`: success value
 
-### 4) Mantener el core pequeño
-- Si vas a sumar features: preferí sumarlas como **librería encima del runtime** (middleware/funciones), no como magia dentro del core.
+Effects are:
+- lazy
+- composable
+- cancelable
+- interpretable by a runtime
 
----
+Execution happens via:
 
-## Conceptos clave (mapa semántico)
+```ts
+toPromise(effect, env)
+```
 
-> (Los nombres exactos pueden variar por archivo, pero el modelo es este.)
-
-- `Exit<E, A>`: resultado de computación (Success/Failure).
-- `Effect<R, E, A>`: core sincrónico (determinístico).
-- `Async<R, E, A>`: ADT que modela async explícito (incluye `register` callback).
-- `Scheduler`: corre trabajo cooperativo.
-- `Fiber`: unidad de ejecución de `Async`; soporta `join`, `interrupt`, y finalizers.
-- `Scope`: estructura de concurrencia + ownership de recursos; cerrar scope cancela y limpia.
-- `acquireRelease`: patrón de resource safety.
-- `ZStream` / streams: pull-based, backpressure, cleanup determinístico.
+The runtime schedules fibers using the global scheduler.
 
 ---
 
-## Patrones de integración con ecosistema JS (LEGO blocks)
+## Fibers
 
-### A) Node-style callbacks → Async
-Patrón: convertir `(err, value) => void` a `Async`.
-- Ideal para `fs`, `child_process`, etc.
+Fibers are lightweight concurrent processes.
 
-Checklist:
-- Mapear error a `Exit Failure`
-- Mapear ok a `Exit Success`
-- Si aplica cancelación: registrar cleanup (remove listener, abort, clearTimeout, etc.)
+Properties:
+- interruptible
+- forkable
+- joinable
+- parent/child structured relationship
 
-### B) Promises → Async (lazy)
-Patrón: `fromPromise(() => promise)` (thunk).
-- Preserva laziness.
-
-Checklist:
-- NUNCA pasar `Promise` ya creado si eso dispara trabajo eagerly.
-- Capturar `.then/.catch` y traducir a `Exit`.
-
-### C) Promises cancelables → Async + finalizer
-Patrón: `fromPromiseAbortable((signal) => promise)` usando `AbortController`.
-- El `register` devuelve un finalizer que llama `abort()`.
-
-Checklist:
-- Cuando el error sea abort/interrupt: traducirlo a “Interrupted” (o el tipo de interrupción que use el runtime).
-- Asegurar que el finalizer sea idempotente (abort múltiple ok).
-
-### D) Event emitters / listeners → Async + cleanup
-Patrón: `fromEvent(target, eventName)`:
-- Registrar handler
-- Devolver finalizer para remover handler al interrumpir/cerrar scope
-
-### E) Node streams → ZStream (resource-aware)
-- `acquireRelease` para crear/destroy stream
-- Buffer/cola intermedia para backpressure
-- Cleanup SIEMPRE (destroy)
+Rules:
+- Child fibers are owned by a parent scope
+- Interrupting a scope interrupts all children
+- No detached background work by default
 
 ---
 
-## HTTP layer (brass-http) — cómo pensarla
-El cliente HTTP “core” debe ser algo tipo:
-- `HttpClient: (req) => Async<_, HttpError, HttpWireResponse>`
+## Scheduler
 
-Y luego encima:
-- decoding (text/json) como funciones “map” sobre wire response
-- middleware (logging, retry, timeout, meta/tracing) como composición, no como fields pegados a tipos base
+The scheduler:
+- drives async callbacks
+- ensures fairness
+- prevents runaway recursion
 
----
-
-## Cómo trabajar en este repo (para LLMs)
-
-### Antes de cambiar código
-1) Buscá “el tipo” que estás tocando:
-    - `type Async<` / `type Effect<` / `class Scope` / `class Scheduler` / `Fiber`
-2) Identificá si el cambio afecta:
-    - laziness
-    - cancelación/interrupción
-    - orden/garantía de finalizers
-    - resource safety (`acquireRelease`, scopes)
-3) Preferí sumar helpers/funciones encima del core antes que tocar el core.
-
-### Al implementar features nuevas
-- Si es “ecosystem integration”: agregá un *bridge* (`fromCallback`, `fromPromiseAbortable`, etc.) y un ejemplo.
-- Si es “operator” (race/timeout/retry): escribilo como combinador puro sobre `Async`.
-- Si es “resource”: usá `acquireRelease` + scope y escribí el release en forma total (no tirar).
-
-### Al arreglar bugs
-- Repro con un ejemplo mínimo en `src/examples/` (ideal).
-- Validar:
-    - ¿se cancela correctamente?
-    - ¿se ejecuta cleanup al perder un `race`?
-    - ¿se liberan recursos cuando se cierra un `Scope`?
+All async boundaries must go through the scheduler.
 
 ---
 
-## Mapa mental / keywords para navegar rápido
-Usá estas strings en búsqueda global:
-- `Async<` / `_tag: "Async"` / `register`
-- `Effect<`
-- `Exit` / `_tag: "Success"` / `_tag: "Failure"`
-- `Interrupted` / `interrupt`
-- `Fiber` / `join` / `addFinalizer`
-- `Scope` / `subScope` / `close` / `isClosed`
-- `acquireRelease`
-- `Scheduler` / `schedule`
-- `ZStream` / `Pull` / `buffer` / `Hub` / `Broadcast`
-- `toPromise` (helper DX para ejemplos)
-- `AbortController` / `AbortSignal`
+## Scope
+
+`Scope<R>` is responsible for **resource lifetime**.
+
+A scope:
+- owns finalizers
+- owns child fibers
+- defines cancellation boundaries
+
+### Invariants
+
+- Finalizers are run **exactly once**
+- Finalizers run in **reverse registration order**
+- Scope interruption propagates to all children
+- Scope closure must eventually complete
+
+### Important Notes
+
+- `scope.close()` is fire‑and‑forget
+- `scope.closeAsync(exit)` returns an `Async` that can be awaited
+- If something “hangs on cancel”, it is almost always a finalizer bug
 
 ---
 
-## Comandos (ver `package.json` para exactitud)
-Sugerencia típica:
-- instalar deps: `npm install` (o `npm ci`)
-- build: `npm run build`
-- test/lint: `npm test` / `npm run lint` (si existen)
-- ejecutar ejemplos: revisar scripts o correr con tu runner (tsx/ts-node/bun/deno según setup)
+## Streams (`ZStream`)
 
-> Regla: no asumas scripts; confirmá mirando `package.json`.
+A `ZStream<R, E, A>` represents a pull‑based stream.
+
+Characteristics:
+- backpressure aware
+- cancelable
+- resource‑safe
+- lazy
+
+Streams are built from **pulls**:
+
+```ts
+pull: ZIO<R, Option<E>, [A, ZStream<R, E, A>]>
+```
+
+Conventions:
+- `Failure(None)` → end of stream
+- `Failure(Some(e))` → stream failure
 
 ---
 
-## “No romper esto” (pitfalls comunes)
-- ❌ Introducir `await`/`Promise` en caminos semánticos del core.
-- ❌ Ejecutar side-effects al construir un `Async`/`Effect` en vez de al correrlo.
-- ❌ Integraciones sin finalizer (event listeners, timeouts, sockets, fetch abortable).
-- ❌ Mezclar “wire” con “decoding” (especialmente en HTTP): mantené capas.
-- ❌ Agregar estado global oculto: preferí `Scope` y env explícito.
+## Pipelines (ZPipeline‑style)
+
+Pipelines are **reusable stream transformers**.
+
+```ts
+type ZPipeline<Rp, Ep, In, Out> =
+  <R, E>(stream: ZStream<R, E, In>) =>
+    ZStream<R & Rp, E | Ep, Out>;
+```
+
+Why pipelines exist:
+- reuse
+- separation of concerns
+- stateful transforms
+- better ergonomics than `map/flatMap` chains
+
+### Composition
+
+- `andThen(p1, p2)` / `>>>`
+- `compose(p2, p1)` / `<<<`
+- `via(stream, pipeline)`
+
+### Design Rules
+
+- Pipelines must not break backpressure
+- Pipelines must respect cancellation
+- Pipelines must not leak resources
 
 ---
 
-## Cómo escribir PRs útiles
-- Cambios chicos y focalizados.
-- Si es integración: agregar un ejemplo mínimo.
-- Si toca cancelación/cleanup: explicar el caso de interrupción (qué se cancela y cuándo).
+## HTTP Client
+
+brass-runtime exposes **two HTTP clients**:
+
+### 1) Non‑streaming client
+
+- `getText`
+- `getJson`
+- `post`
+- `postJson`
+
+This client eagerly consumes the body via `fetch().text()`.
+
+It is intended for:
+- small payloads
+- simple DX
+- classic REST usage
+
+### 2) Streaming HTTP client
+
+- `httpClientStream`
+- body is a `ZStream<Uint8Array>`
+
+This client:
+- does NOT eagerly read the body
+- supports backpressure
+- supports cancellation
+- works in Browser and Node 18+
+
+---
+
+## HTTP Streaming Internals
+
+### Web Streams → ZStream
+
+`ReadableStream<Uint8Array>` is adapted via:
+
+```ts
+streamFromReadableStream(body, normalizeError)
+```
+
+This helper:
+- builds a pull‑based `ZStream`
+- registers `reader.cancel()` as a finalizer
+- propagates fetch abort on interruption
+
+### Cancellation Flow
+
+1. Fiber interrupted
+2. Scope closes
+3. `AbortController.abort()` is called
+4. Reader is cancelled
+5. Stream ends
+
+If cancellation hangs, the bug is:
+- a finalizer that never completes
+- or misuse of `scope.close()` instead of `closeAsync`
+
+---
+
+## HTTP Request Model
+
+`HttpRequest` intentionally separates:
+
+- `headers`
+- `init` (RequestInit without headers/body/method)
+- `body`
+
+This avoids implicit mutation of `RequestInit`
+and makes header handling explicit.
+
+Client helpers (`post`, `postJson`) accept
+a convenient `init + headers` shape and adapt it internally.
+
+---
+
+## Error Handling
+
+- All errors are typed
+- Stream end is NOT an error
+- Cancellation is modeled explicitly
+
+If you see `unknown` creeping into stream errors,
+it usually means a constructor was not typed strictly enough.
+
+---
+
+## Common Failure Modes
+
+### Scope never finishes cancelling
+
+Almost always:
+- a finalizer returns a non‑terminating effect
+- `unit` was returned instead of `unit()`
+- `scope.close()` was used instead of awaiting `closeAsync()`
+
+### HTTP streaming hangs
+
+Usually:
+- reader was not cancelled
+- fetch was not wired to `AbortSignal`
+- stream adapter leaked
+
+---
+
+## Non‑Goals
+
+brass-runtime intentionally does NOT try to be:
+
+- a framework
+- a Promise wrapper
+- RxJS
+- a magic abstraction
+
+Everything is explicit by design.
+
+---
+
+## Design North Star
+
+> Make effects explicit.  
+> Make cancellation correct.  
+> Make streaming boring and safe.
