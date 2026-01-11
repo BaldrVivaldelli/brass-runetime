@@ -1,3 +1,10 @@
+## [1.9.2](https://github.com/BaldrVivaldelli/brass-runtime/compare/v1.9.1...v1.9.2) (2026-01-11)
+
+
+### Bug Fixes
+
+* add more imports ([8a1d7ce](https://github.com/BaldrVivaldelli/brass-runtime/commit/8a1d7ce88a4deae01c57c0bb87d5d4addbb7b4a1))
+
 ## [1.9.1](https://github.com/BaldrVivaldelli/brass-runtime/compare/v1.9.0...v1.9.1) (2026-01-11)
 
 
