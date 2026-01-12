@@ -1,3 +1,10 @@
+## [1.9.3](https://github.com/BaldrVivaldelli/brass-runtime/compare/v1.9.2...v1.9.3) (2026-01-12)
+
+
+### Bug Fixes
+
+* fix infer type param in request ([04e0f65](https://github.com/BaldrVivaldelli/brass-runtime/commit/04e0f65b57187d2288d7db35f3f9ac0fc57f278b))
+
 ## [1.9.2](https://github.com/BaldrVivaldelli/brass-runtime/compare/v1.9.1...v1.9.2) (2026-01-11)
 
 
